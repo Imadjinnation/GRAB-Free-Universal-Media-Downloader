@@ -1,0 +1,12 @@
+# Runtime state — never checked in
+state/
+*.log
+*.tmp
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/

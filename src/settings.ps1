@@ -1,0 +1,208 @@
+# src/settings.ps1
+# Loads ui/settings.xaml, binds controls to config values, and persists
+# edits via Update-Config. Autostart toggle also creates/removes the
+# shell:startup shortcut so it takes effect immediately.
+#
+# Public functions:
+#   Show-Settings                 -- open the settings window
+#
+# Dot-source: . "$PSScriptRoot\settings.ps1"
+
+Add-Type -AssemblyName PresentationFramework | Out-Null
+Add-Type -AssemblyName PresentationCore      | Out-Null
+Add-Type -AssemblyName WindowsBase           | Out-Null
+Add-Type -AssemblyName System.Windows.Forms  | Out-Null
+
+. "$PSScriptRoot\utils.ps1"
+
+$script:SettingsWindow = $null
+
+function Get-AutostartShortcutPath {
+    Join-Path ([Environment]::GetFolderPath('Startup')) 'grab.lnk'
+}
+
+function Set-Autostart([bool]$enable) {
+    # Toggles shell:startup shortcut immediately (config also stored so
+    # install.ps1 respects the choice on next run).
+    $lnk = Get-AutostartShortcutPath
+    if ($enable) {
+        $wsh = New-Object -ComObject WScript.Shell
+        $sc = $wsh.CreateShortcut($lnk)
+        $sc.TargetPath = 'powershell.exe'
+        $entry = Join-Path (Split-Path $PSScriptRoot -Parent) 'grab-app.ps1'
+        $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
+        $sc.WorkingDirectory = (Split-Path $PSScriptRoot -Parent)
+        $sc.IconLocation = "$env:SystemRoot\System32\imageres.dll,109"
+        $sc.Description  = 'Launch grab tray at login'
+        $sc.Save()
+    } else {
+        if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Load-SettingsWindow {
+    if ($script:SettingsWindow) { return $script:SettingsWindow }
+
+    $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\settings.xaml'
+    [xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
+    $reader = New-Object System.Xml.XmlNodeReader $xaml
+    $w = [Windows.Markup.XamlReader]::Load($reader)
+
+    $ctl = @{}
+    foreach ($n in @('TitleBar','MinBtn','CloseBtn',
+                     'DownloadFolder','BrowseBtn','AskBeforeEach',
+                     'ConcurrencySlider','ConcurrencyLabel',
+                     'CookieBrowser','ToastsEnabled','ClipboardWatch','Autostart',
+                     'VersionLabel','OpenStateBtn','OpenLogsBtn',
+                     'ResetBtn','SaveBtn','CancelBtn','StatusLine')) {
+        $ctl[$n] = $w.FindName($n)
+    }
+
+    # Local captures for closures
+    $CtlLocal = $ctl
+    $WinLocal = $w
+
+    # ---------- Titlebar behavior ------------------------------------------
+    $ctl.TitleBar.Add_MouseLeftButtonDown({ $WinLocal.DragMove() }.GetNewClosure())
+    $ctl.MinBtn.Add_Click({ $WinLocal.WindowState = 'Minimized' }.GetNewClosure())
+    $ctl.CloseBtn.Add_Click({ $WinLocal.Hide() }.GetNewClosure())
+    $w.Add_Closing({ param($sender, $e) $e.Cancel = $true; $sender.Hide() })
+
+    # ---------- Concurrency slider live label ------------------------------
+    $ctl.ConcurrencySlider.Add_ValueChanged({
+        $CtlLocal.ConcurrencyLabel.Text = [int]$CtlLocal.ConcurrencySlider.Value
+    }.GetNewClosure())
+
+    # ---------- Browse folder ---------------------------------------------
+    $ctl.BrowseBtn.Add_Click({
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = 'Pick a default download folder for grab'
+        $dlg.ShowNewFolderButton = $true
+        $current = $CtlLocal.DownloadFolder.Text
+        if ($current -and (Test-Path -LiteralPath $current)) { $dlg.SelectedPath = $current }
+        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $CtlLocal.DownloadFolder.Text = $dlg.SelectedPath
+        }
+    }.GetNewClosure())
+
+    # ---------- About buttons ---------------------------------------------
+    $ctl.OpenStateBtn.Add_Click({
+        $p = Get-AppDataPath
+        if (Test-Path -LiteralPath $p) { Start-Process explorer.exe $p }
+    }.GetNewClosure())
+    $ctl.OpenLogsBtn.Add_Click({
+        $p = Get-LogFolder
+        if (Test-Path -LiteralPath $p) { Start-Process explorer.exe $p }
+    }.GetNewClosure())
+
+    # ---------- Save / Cancel / Reset -------------------------------------
+    $ctl.SaveBtn.Add_Click({
+        try {
+            $folder = $CtlLocal.DownloadFolder.Text.Trim()
+            if (-not $folder) {
+                $CtlLocal.StatusLine.Text = 'Download folder cannot be empty.'
+                return
+            }
+            if (-not (Test-Path -LiteralPath $folder)) {
+                try {
+                    New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null
+                } catch {
+                    $CtlLocal.StatusLine.Text = "Can't create folder: $($_.Exception.Message)"
+                    return
+                }
+            }
+
+            $updates = @{
+                downloadFolder    = $folder
+                askBeforeEach     = [bool]$CtlLocal.AskBeforeEach.IsChecked
+                concurrency       = [int]$CtlLocal.ConcurrencySlider.Value
+                cookieBrowser     = ($CtlLocal.CookieBrowser.SelectedItem.Content).ToString()
+                toastsEnabled     = [bool]$CtlLocal.ToastsEnabled.IsChecked
+                clipboardWatch    = [bool]$CtlLocal.ClipboardWatch.IsChecked
+                autostart         = [bool]$CtlLocal.Autostart.IsChecked
+                firstRunComplete  = $true
+            }
+            Update-Config $updates | Out-Null
+
+            # Autostart shortcut mirrors the toggle immediately
+            try { Set-Autostart $updates.autostart } catch {
+                Log-Warn "autostart toggle failed: $($_.Exception.Message)"
+            }
+
+            $CtlLocal.StatusLine.Text = 'Saved.'
+            Log-Info "settings saved: folder=$folder, concurrency=$($updates.concurrency), clipboard=$($updates.clipboardWatch), autostart=$($updates.autostart)"
+            $WinLocal.Hide()
+        } catch {
+            $CtlLocal.StatusLine.Text = "Save failed: $($_.Exception.Message)"
+            Log-Err "settings save exception: $($_.Exception.Message)"
+        }
+    }.GetNewClosure())
+
+    $ctl.CancelBtn.Add_Click({ $WinLocal.Hide() }.GetNewClosure())
+
+    $ctl.ResetBtn.Add_Click({
+        $answer = [System.Windows.MessageBox]::Show(
+            'Reset every setting to its default value?' + "`n`n" +
+            'This does NOT delete downloads or history -- only the settings on this screen.',
+            'grab -- Reset settings',
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Warning)
+        if ($answer -eq 'Yes') {
+            $defaultFolder = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
+            $CtlLocal.DownloadFolder.Text = $defaultFolder
+            $CtlLocal.AskBeforeEach.IsChecked = $false
+            $CtlLocal.ConcurrencySlider.Value = 3
+            $CtlLocal.CookieBrowser.SelectedIndex = 0
+            $CtlLocal.ToastsEnabled.IsChecked  = $true
+            $CtlLocal.ClipboardWatch.IsChecked = $false
+            $CtlLocal.Autostart.IsChecked      = $true
+            $CtlLocal.StatusLine.Text = 'Defaults loaded. Click Save to apply.'
+        }
+    }.GetNewClosure())
+
+    $w | Add-Member -MemberType NoteProperty -Name '__Controls' -Value $ctl -Force
+    $script:SettingsWindow = $w
+    return $w
+}
+
+function Show-Settings {
+    Log-Info 'Show-Settings called'
+    try {
+        $w = Load-SettingsWindow
+        $ctl = $w.__Controls
+        $cfg = Get-Config
+
+        # Bind current values into controls
+        $ctl.DownloadFolder.Text = if ($cfg.downloadFolder) { [string]$cfg.downloadFolder } else { Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab' }
+        $ctl.AskBeforeEach.IsChecked = [bool]$cfg.askBeforeEach
+        $ctl.ConcurrencySlider.Value = [int]$cfg.concurrency
+        $ctl.ConcurrencyLabel.Text = [string][int]$cfg.concurrency
+
+        # Cookie browser combo
+        $browserVal = if ($cfg.cookieBrowser) { [string]$cfg.cookieBrowser } else { 'chrome' }
+        $found = $false
+        for ($i = 0; $i -lt $ctl.CookieBrowser.Items.Count; $i++) {
+            if (($ctl.CookieBrowser.Items[$i].Content).ToString() -eq $browserVal) {
+                $ctl.CookieBrowser.SelectedIndex = $i
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { $ctl.CookieBrowser.SelectedIndex = 0 }
+
+        $ctl.ToastsEnabled.IsChecked  = [bool]$cfg.toastsEnabled
+        $ctl.ClipboardWatch.IsChecked = [bool]$cfg.clipboardWatch
+        $ctl.Autostart.IsChecked      = [bool]$cfg.autostart
+        $ctl.VersionLabel.Text = "grab v$($cfg.version)  ·  state: $(Get-AppDataPath)"
+        $ctl.StatusLine.Text = ''
+
+        if ($w.WindowState -eq 'Minimized') { $w.WindowState = 'Normal' }
+        $w.Show()
+        $w.Activate()
+        $w.Topmost = $true
+        $w.Topmost = $false
+    } catch {
+        Log-Err "Show-Settings exception: $($_.Exception.Message)"
+        throw
+    }
+}

@@ -1,0 +1,8 @@
+{
+  "_comment": "Ships with grab-app. Overrides gallery-dl's default folder templates for sites where the default causes chapters to collide (same {title} across multiple chapters). See src/core.ps1 which passes this via --config to every gallery-dl invocation.",
+  "extractor": {
+    "allporncomic": {
+      "directory": ["{category}", "{manga}", "Ch {chapter:>03} - {title:?/-/}{chapter_id}"]
+    }
+  }
+}
