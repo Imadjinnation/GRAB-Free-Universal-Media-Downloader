@@ -73,13 +73,15 @@ function New-QueueJob {
     param(
         [Parameter(Mandatory)][string]$Url,
         [string]$Dest = $null,
-        [ValidateSet('auto','yt-dlp','gallery-dl')][string]$Tool = 'auto'
+        [ValidateSet('auto','yt-dlp','gallery-dl')][string]$Tool = 'auto',
+        [bool]$Sensitive = $false
     )
     [PSCustomObject]@{
         Id          = [guid]::NewGuid().ToString()
         Url         = $Url
         Dest        = $Dest
         Tool        = $Tool
+        Sensitive   = [bool]$Sensitive
         Status      = 'pending'
         StatusMsg   = 'Waiting to start'
         AddedAt     = (Get-Date).ToString('o')
@@ -99,21 +101,20 @@ function Add-QueueJob {
     param(
         [Parameter(Mandatory)][string[]]$Urls,
         [string]$Dest = $null,
-        [ValidateSet('auto','yt-dlp','gallery-dl')][string]$Tool = 'auto'
+        [ValidateSet('auto','yt-dlp','gallery-dl')][string]$Tool = 'auto',
+        [switch]$Sensitive     # force route to .private for these URLs
     )
-    # Read-Queue emits entries individually; @() collects them into an array.
     $queue = @(Read-Queue)
-    # Dedupe: skip URLs already pending or running
     $active = @{}
     foreach ($j in $queue) { if ($j.Status -in @('pending','running')) { $active[$j.Url] = $true } }
     $added = 0
     foreach ($u in $Urls) {
         if (-not (Test-IsUrl $u))     { continue }
         if ($active.ContainsKey($u))  { continue }
-        $queue = $queue + @(New-QueueJob -Url $u -Dest $Dest -Tool $Tool)
-        $active[$u] = $true   # dedupe within the same batch too
-        $added = $added + 1   # $added++ leaks the pre-increment value to output; do NOT use it here
-        Log-Info "queued $u"
+        $queue = $queue + @(New-QueueJob -Url $u -Dest $Dest -Tool $Tool -Sensitive:$Sensitive)
+        $active[$u] = $true
+        $added = $added + 1
+        Log-Info ("queued " + $u + $(if ($Sensitive) { ' [SENSITIVE]' } else { '' }))
     }
     Write-Queue $queue
     return $added
@@ -275,15 +276,17 @@ function Invoke-QueueTick {
 
         $srcRoot = $PSScriptRoot
         $scriptBlock = {
-            param($SrcRoot, $Url, $Dest, $Tool)
+            param($SrcRoot, $Url, $Dest, $Tool, $Sensitive)
             . "$SrcRoot\utils.ps1"
             . "$SrcRoot\core.ps1"
             $params = @{ Url = $Url }
             if ($Dest) { $params['Dest'] = $Dest }
             if ($Tool -and $Tool -ne 'auto') { $params['Tool'] = $Tool }
+            if ($Sensitive) { $params['Sensitive'] = $true }
             Invoke-Grab @params
         }
-        $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $srcRoot, $j.Url, $j.Dest, $j.Tool
+        $sensitiveFlag = [bool]$j.Sensitive
+        $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $srcRoot, $j.Url, $j.Dest, $j.Tool, $sensitiveFlag
         $j.Status    = 'running'
         $j.StatusMsg = 'Downloading'
         $j.StartedAt = (Get-Date).ToString('o')

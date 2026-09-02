@@ -278,10 +278,19 @@
 
           <!-- Actions row -->
           <Grid Grid.Row="4" Margin="0,16,0,0">
-            <Button x:Name="ToggleMulti"
-                    Style="{StaticResource GhostBtn}"
-                    Content="Add many..."
-                    HorizontalAlignment="Left"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+              <Button x:Name="ToggleMulti"
+                      Style="{StaticResource GhostBtn}"
+                      Content="Add many..."/>
+              <CheckBox x:Name="SensitiveToggle"
+                        Content="&#128274; Sensitive"
+                        ToolTip="Route this download to a hidden .private folder"
+                        Foreground="#8E8E93"
+                        FontSize="11"
+                        VerticalAlignment="Center"
+                        Margin="12,0,0,0"
+                        Cursor="Hand"/>
+            </StackPanel>
             <Button x:Name="GrabBtn"
                     Style="{StaticResource PrimaryBtn}"
                     Content="Grab it"

@@ -294,6 +294,35 @@
           <CheckBox x:Name="ClipboardWatch" Style="{StaticResource ToggleCheck}"
                     Content="Watch the clipboard -- offer to grab when I copy a URL"/>
 
+          <!-- Safety section -->
+          <TextBlock Style="{StaticResource SectionHeader}" Text="SAFETY / PRIVACY"/>
+          <TextBlock Style="{StaticResource FieldLabel}"
+                     Text="Sensitive downloads route into a hidden .private/ folder (Windows Hidden attribute)."/>
+          <CheckBox x:Name="SensitiveByDefault" Style="{StaticResource ToggleCheck}"
+                    Content="Treat EVERY download as sensitive"
+                    Margin="0,4,0,10"/>
+          <TextBlock Style="{StaticResource FieldLabel}"
+                     Text="Auto-sensitive URL patterns (one per line -- substring, case-insensitive)"
+                     Margin="0,10,0,6"/>
+          <Border CornerRadius="6"
+                  Background="{StaticResource BgSoft}"
+                  BorderBrush="{StaticResource BorderInput}"
+                  BorderThickness="1">
+            <TextBox x:Name="SensitiveSites"
+                     Background="Transparent"
+                     Foreground="{StaticResource Text}"
+                     BorderThickness="0"
+                     FontFamily="Consolas, Segoe UI"
+                     FontSize="12"
+                     Padding="10,7"
+                     Height="110"
+                     TextWrapping="NoWrap"
+                     AcceptsReturn="True"
+                     VerticalScrollBarVisibility="Auto"/>
+          </Border>
+          <TextBlock Foreground="{StaticResource TextDim}" FontSize="10" Margin="4,6,0,0"
+                     Text="Example: nhentai.net, allporncomic.com, e-hentai.org"/>
+
           <!-- Startup section -->
           <TextBlock Style="{StaticResource SectionHeader}" Text="STARTUP"/>
           <CheckBox x:Name="Autostart" Style="{StaticResource ToggleCheck}"

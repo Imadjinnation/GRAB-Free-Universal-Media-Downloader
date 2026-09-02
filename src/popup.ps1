@@ -191,7 +191,7 @@ function Load-PopupWindow {
                      'TabPaste','TabQueue','TabRecent',
                      'PastePanel','QueuePanel','RecentPanel',
                      'UrlBox','MultiBox','SingleInputBorder','MultiInputBorder',
-                     'Hint','StatusLine','ToggleMulti','GrabBtn',
+                     'Hint','StatusLine','ToggleMulti','GrabBtn','SensitiveToggle',
                      'QueueList','QueueEmpty','QueueClearDone',
                      'RecentList','RecentEmpty')) {
         $ctl[$n] = $w.FindName($n)
@@ -284,14 +284,19 @@ function Load-PopupWindow {
                 $CtlLocal.StatusLine.Text = "That doesn't look like a URL. Paste a link starting with http:// or https://."
                 return
             }
-            $added = Add-QueueJob -Urls $urls
-            Log-Info "submit: Add-QueueJob returned added=$added"
+            $isSensitive = [bool]$CtlLocal.SensitiveToggle.IsChecked
+            $added = if ($isSensitive) { Add-QueueJob -Urls $urls -Sensitive } else { Add-QueueJob -Urls $urls }
+            Log-Info ("submit: Add-QueueJob returned added=$added" + $(if ($isSensitive) { ' [SENSITIVE]' } else { '' }))
+            $suffix = if ($isSensitive) { ' [sensitive -> .private]' } else { '' }
             $CtlLocal.StatusLine.Text = if ($added -eq 0) { "Already in the queue." }
-                                        elseif ($added -eq 1) { "Added 1. Switch to Queue tab to watch." }
-                                        else { "Added $added. Switch to Queue tab to watch." }
+                                        elseif ($added -eq 1) { "Added 1$suffix. Switch to Queue tab to watch." }
+                                        else { "Added $added$suffix. Switch to Queue tab to watch." }
             if ($added -gt 0) {
                 $CtlLocal.UrlBox.Text = ''
                 $CtlLocal.MultiBox.Text = ''
+                # Reset sensitive toggle after submit so the next grab isn't accidentally
+                # inheriting the flag. Sticky would be dangerous.
+                $CtlLocal.SensitiveToggle.IsChecked = $false
                 & $SwitchRef.Value 'TabQueue'
             }
         } catch {

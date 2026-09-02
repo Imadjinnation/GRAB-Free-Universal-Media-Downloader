@@ -53,6 +53,7 @@ function Load-SettingsWindow {
                      'DownloadFolder','BrowseBtn','AskBeforeEach',
                      'ConcurrencySlider','ConcurrencyLabel',
                      'CookieBrowser','ToastsEnabled','ClipboardWatch','Autostart',
+                     'SensitiveByDefault','SensitiveSites',
                      'VersionLabel','OpenStateBtn','OpenLogsBtn',
                      'ResetBtn','SaveBtn','CancelBtn','StatusLine')) {
         $ctl[$n] = $w.FindName($n)
@@ -112,15 +113,23 @@ function Load-SettingsWindow {
                 }
             }
 
+            # Parse sensitive-sites textarea: one pattern per line, trim, drop
+            # blanks / comment-lines (starting with #), keep the rest.
+            $rawLines = $CtlLocal.SensitiveSites.Text -split "`r?`n"
+            $sitePatterns = @($rawLines | ForEach-Object { $_.Trim() } |
+                              Where-Object { $_ -and -not $_.StartsWith('#') })
+
             $updates = @{
-                downloadFolder    = $folder
-                askBeforeEach     = [bool]$CtlLocal.AskBeforeEach.IsChecked
-                concurrency       = [int]$CtlLocal.ConcurrencySlider.Value
-                cookieBrowser     = ($CtlLocal.CookieBrowser.SelectedItem.Content).ToString()
-                toastsEnabled     = [bool]$CtlLocal.ToastsEnabled.IsChecked
-                clipboardWatch    = [bool]$CtlLocal.ClipboardWatch.IsChecked
-                autostart         = [bool]$CtlLocal.Autostart.IsChecked
-                firstRunComplete  = $true
+                downloadFolder     = $folder
+                askBeforeEach      = [bool]$CtlLocal.AskBeforeEach.IsChecked
+                concurrency        = [int]$CtlLocal.ConcurrencySlider.Value
+                cookieBrowser      = ($CtlLocal.CookieBrowser.SelectedItem.Content).ToString()
+                toastsEnabled      = [bool]$CtlLocal.ToastsEnabled.IsChecked
+                clipboardWatch     = [bool]$CtlLocal.ClipboardWatch.IsChecked
+                autostart          = [bool]$CtlLocal.Autostart.IsChecked
+                sensitiveByDefault = [bool]$CtlLocal.SensitiveByDefault.IsChecked
+                sensitiveSites     = $sitePatterns
+                firstRunComplete   = $true
             }
             Update-Config $updates | Out-Null
 
@@ -156,6 +165,8 @@ function Load-SettingsWindow {
             $CtlLocal.ToastsEnabled.IsChecked  = $true
             $CtlLocal.ClipboardWatch.IsChecked = $false
             $CtlLocal.Autostart.IsChecked      = $true
+            $CtlLocal.SensitiveByDefault.IsChecked = $false
+            $CtlLocal.SensitiveSites.Text = ''
             $CtlLocal.StatusLine.Text = 'Defaults loaded. Click Save to apply.'
         }
     }.GetNewClosure())
@@ -193,6 +204,9 @@ function Show-Settings {
         $ctl.ToastsEnabled.IsChecked  = [bool]$cfg.toastsEnabled
         $ctl.ClipboardWatch.IsChecked = [bool]$cfg.clipboardWatch
         $ctl.Autostart.IsChecked      = [bool]$cfg.autostart
+        $ctl.SensitiveByDefault.IsChecked = [bool]$cfg.sensitiveByDefault
+        # Show current sensitive-sites list, one per line
+        $ctl.SensitiveSites.Text = if ($cfg.sensitiveSites) { ($cfg.sensitiveSites -join "`r`n") } else { '' }
         $ctl.VersionLabel.Text = "grab v$($cfg.version)  ·  state: $(Get-AppDataPath)"
         $ctl.StatusLine.Text = ''
 

@@ -81,7 +81,12 @@ function Invoke-Grab {
         [Parameter(Mandatory)][string]$Url,
         [string]$Dest = $null,
         [ValidateSet('auto','yt-dlp','gallery-dl')][string]$Tool = 'auto',
-        [switch]$NoCookies
+        [switch]$NoCookies,
+        # When true (or when URL auto-matches a sensitive pattern in config),
+        # inject the "<sensitiveFolderName>" (default ".private") between
+        # Category and Domain, and mark that folder Hidden. Callers who
+        # already know the download is sensitive can force it with this flag.
+        [switch]$Sensitive
     )
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -91,15 +96,36 @@ function Invoke-Grab {
     $grabStartedAt = Get-Date
     $cfg = Get-Config
 
+    # Decide sensitivity: explicit flag OR URL matches saved patterns OR
+    # user opted "sensitive by default" in Settings.
+    $isSensitive = [bool]$Sensitive -or (Test-IsSensitiveUrl $Url)
+
     if (-not $Dest) {
-        # New layout (2026-09-02): <downloadFolder>\<Category>\<FullDomain>\...
+        # Layout:
+        #   Normal:    <downloadFolder>\<Category>\<Domain>\...
+        #   Sensitive: <downloadFolder>\<Category>\<.private>\<Domain>\...
+        # The .private folder gets the Windows Hidden attribute so Explorer
+        # doesn't show it unless "Show hidden items" is on.
         $category = Get-CategoryForUrl $Url
         $domain   = Get-FullDomain     $Url
-        $Dest = Join-Path $cfg.downloadFolder (Join-Path $category $domain)
+        if ($isSensitive) {
+            $privateName = if ($cfg.sensitiveFolderName) { [string]$cfg.sensitiveFolderName } else { '.private' }
+            $Dest = Join-Path $cfg.downloadFolder (Join-Path $category (Join-Path $privateName $domain))
+        } else {
+            $Dest = Join-Path $cfg.downloadFolder (Join-Path $category $domain)
+        }
     }
     # -LiteralPath in both Test-Path and New-Item so a downloadFolder with
     # `[` or `]` isn't interpreted as a wildcard pattern.
     if (-not (Test-Path -LiteralPath $Dest)) { New-Item -ItemType Directory -Path $Dest -Force | Out-Null }
+
+    # If sensitive, ensure the .private folder itself is Hidden (may already
+    # exist from an earlier grab -- Set-FolderHidden is idempotent).
+    if ($isSensitive) {
+        $privateName = if ($cfg.sensitiveFolderName) { [string]$cfg.sensitiveFolderName } else { '.private' }
+        $privatePath = Join-Path $cfg.downloadFolder (Join-Path (Get-CategoryForUrl $Url) $privateName)
+        Set-FolderHidden $privatePath
+    }
 
     # Disk space check: warn if <1GB free on the destination drive. Doesn't
     # block the download (some downloads are <1MB); just makes the reason

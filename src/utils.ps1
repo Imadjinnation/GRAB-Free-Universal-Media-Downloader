@@ -42,24 +42,38 @@ function Ensure-AppData {
 function Get-Config {
     Ensure-AppData
     if (-not (Test-Path $script:ConfigPath)) {
-        # Should not happen post-install, but defensive default.
         $default = @{
-            version           = '0.1.0'
-            downloadFolder    = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
-            askBeforeEach     = $false
-            clipboardWatch    = $false
-            concurrency       = 3
-            autostart         = $true
-            cookieBrowser     = 'chrome'
-            toastsEnabled     = $true
-            popupPositionX    = $null
-            popupPositionY    = $null
-            firstRunComplete  = $false
+            version              = '0.1.0'
+            downloadFolder       = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
+            askBeforeEach        = $false
+            clipboardWatch       = $false
+            concurrency          = 3
+            autostart            = $true
+            cookieBrowser        = 'chrome'
+            toastsEnabled        = $true
+            popupPositionX       = $null
+            popupPositionY       = $null
+            firstRunComplete     = $false
+            # Safety / privacy
+            sensitiveByDefault   = $false                 # every download routes to .private
+            sensitiveSites       = @()                    # URL substrings that auto-route to .private
+            sensitiveFolderName  = '.private'             # folder name inside category
         }
         $default | ConvertTo-Json -Depth 4 | Set-Content -Path $script:ConfigPath -Encoding UTF8
         return $default
     }
-    return Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
+    $cfg = Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
+    # Back-fill new keys added post-first-config, so older configs still work
+    if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveSites')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name sensitiveSites -Value @() -Force
+    }
+    if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveByDefault')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name sensitiveByDefault -Value $false -Force
+    }
+    if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveFolderName')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name sensitiveFolderName -Value '.private' -Force
+    }
+    return $cfg
 }
 
 function Set-Config([object]$config) {
@@ -170,6 +184,37 @@ function Get-FullDomain([string]$u) {
         if ([string]::IsNullOrWhiteSpace($h)) { return 'misc' }
         return $h.ToLower()
     } catch { 'misc' }
+}
+
+function Test-IsSensitiveUrl([string]$url) {
+    # Routes a URL to the .private hidden subfolder if:
+    #   - sensitiveByDefault is on, OR
+    #   - the URL matches any pattern in sensitiveSites (case-insensitive
+    #     substring; simple regex-escape so users don't need to know regex).
+    # Case-insensitive so "AllPornComic.com" matches "allporncomic.com".
+    $cfg = Get-Config
+    if ($cfg.sensitiveByDefault) { return $true }
+    if (-not $cfg.sensitiveSites) { return $false }
+    $lower = $url.ToLower()
+    foreach ($pat in $cfg.sensitiveSites) {
+        if ([string]::IsNullOrWhiteSpace($pat)) { continue }
+        if ($lower -like ("*" + $pat.ToLower().Trim() + "*")) { return $true }
+    }
+    return $false
+}
+
+function Set-FolderHidden([string]$path) {
+    # Idempotently sets Hidden attribute on a folder. Wrapped in try/catch
+    # because attribute writes can fail on protected paths -- and that
+    # should never block a download.
+    try {
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (-not ($item.Attributes -band [System.IO.FileAttributes]::Hidden)) {
+                $item.Attributes = $item.Attributes -bor [System.IO.FileAttributes]::Hidden
+            }
+        }
+    } catch { Log-Warn "Set-FolderHidden failed on $path : $($_.Exception.Message)" }
 }
 
 function Get-CategoryForUrl([string]$u) {

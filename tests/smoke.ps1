@@ -180,7 +180,8 @@ Section 'Function exports'
 $expectedExports = @{
     'utils.ps1' = @('Get-AppDataPath','Get-Config','Set-Config','Update-Config',
                     'Ensure-AppData','Test-IsUrl','Get-SiteName','Pick-Tool',
-                    'Resolve-Tool','Log-Info','Send-Toast')
+                    'Resolve-Tool','Log-Info','Send-Toast',
+                    'Test-IsSensitiveUrl','Set-FolderHidden')
     'core.ps1'  = @('Invoke-Grab','Get-FileCount')
     'queue.ps1' = @('Add-QueueJob','Read-Queue','Write-Queue','Cancel-QueueJob',
                     'Retry-QueueJob','Clear-QueueDone','Append-Recent','Get-Recent',
@@ -680,6 +681,68 @@ Test 'Invoke-Grab warns on low disk space (audit med-12 groundwork)' {
     $c = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
     Assert-Match $c 'disk-space low'
     Assert-Match $c 'PathRoot\(\$Dest\)'
+}
+
+Test 'Test-IsSensitiveUrl matches configured patterns (case-insensitive substring)' {
+    $orig = (Get-Config).sensitiveSites
+    try {
+        Update-Config @{ sensitiveSites = @('nhentai.net','allporncomic.com','MY-CUSTOM-PATTERN') } | Out-Null
+        Update-Config @{ sensitiveByDefault = $false } | Out-Null
+        Assert-True (Test-IsSensitiveUrl 'https://nhentai.net/g/12345/')
+        Assert-True (Test-IsSensitiveUrl 'https://ALLPORNCOMIC.COM/porncomic/x/')    # case-insensitive
+        Assert-True (Test-IsSensitiveUrl 'https://example.com/my-CUSTOM-pattern/xyz') # substring, insensitive
+        Assert-True (-not (Test-IsSensitiveUrl 'https://youtube.com/watch?v=abc'))
+        Assert-True (-not (Test-IsSensitiveUrl 'https://mangadex.org/'))
+    } finally {
+        Update-Config @{ sensitiveSites = @($orig) } | Out-Null
+    }
+}
+Test 'Test-IsSensitiveUrl returns $true for everything when sensitiveByDefault' {
+    $orig = (Get-Config).sensitiveByDefault
+    try {
+        Update-Config @{ sensitiveByDefault = $true } | Out-Null
+        Assert-True (Test-IsSensitiveUrl 'https://any-url.example/whatever')
+    } finally {
+        Update-Config @{ sensitiveByDefault = $orig } | Out-Null
+    }
+}
+Test 'Invoke-Grab routes into .private when -Sensitive is passed' {
+    # The private folder is inserted between Category and Domain.
+    $cfg = Get-Config
+    $expected = Join-Path $cfg.downloadFolder (Join-Path 'Comics' (Join-Path $cfg.sensitiveFolderName 'allporncomic.com'))
+    $r = Invoke-Grab -Url 'https://allporncomic.com/porncomic/does-not-exist-xyz/' -Sensitive -NoCookies
+    Assert-Equal $expected $r.Destination
+}
+Test 'Set-FolderHidden actually sets the Windows Hidden attribute' {
+    $tmp = Join-Path $env:TEMP ('hide-test-' + [guid]::NewGuid().ToString('N').Substring(0,6))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Set-FolderHidden $tmp
+        $item = Get-Item -LiteralPath $tmp -Force
+        Assert-True ([bool]($item.Attributes -band [System.IO.FileAttributes]::Hidden)) 'folder was not marked Hidden'
+    } finally {
+        # Un-hide before Remove-Item -Force so cleanup doesn't get confused
+        try {
+            $it = Get-Item -LiteralPath $tmp -Force -ErrorAction Stop
+            $it.Attributes = $it.Attributes -band (-bnot [System.IO.FileAttributes]::Hidden)
+        } catch {}
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+Test 'settings.xaml has the SensitiveByDefault + SensitiveSites controls' {
+    Add-Type -AssemblyName PresentationFramework | Out-Null
+    [xml]$x = Get-Content (Join-Path $uiRoot 'settings.xaml') -Raw
+    $reader = New-Object System.Xml.XmlNodeReader $x
+    $win = [Windows.Markup.XamlReader]::Load($reader)
+    Assert-NotNull ($win.FindName('SensitiveByDefault')) 'missing SensitiveByDefault checkbox'
+    Assert-NotNull ($win.FindName('SensitiveSites'))     'missing SensitiveSites textarea'
+}
+Test 'popup.xaml has the SensitiveToggle checkbox on the Paste tab' {
+    Add-Type -AssemblyName PresentationFramework | Out-Null
+    [xml]$x = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
+    $reader = New-Object System.Xml.XmlNodeReader $x
+    $win = [Windows.Markup.XamlReader]::Load($reader)
+    Assert-NotNull ($win.FindName('SensitiveToggle'))
 }
 
 Test 'grab-app.ps1 declares the singleton mutex correctly (prevents multi-tray bug)' {
