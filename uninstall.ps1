@@ -93,7 +93,12 @@ if ($vbsTray) {
     }
 }
 
-# --- 2. Desktop shortcuts (LOCAL + OneDrive-redirected) -----------------
+# --- 2. Desktop shortcuts (VISIBLE + LOCAL + OneDrive-redirected) -------
+# Phase 6.5 root cause 2: sweep BOTH the visible desktop (shell folder,
+# possibly OneDrive-redirected) AND the local non-KFM path. Pre-6.5 installs
+# wrote to the local path (invisible under KFM); post-6.5 installs write to
+# the visible path. Either can be left behind depending on when the install
+# happened, so uninstall must clean up both.
 Section 'Desktop shortcuts'
 $desktopCandidates = @(
     [Environment]::GetFolderPath('Desktop'),
@@ -110,6 +115,33 @@ foreach ($desk in $desktopCandidates) {
         }
     }
 }
+
+# --- 2b. Start Menu shortcut (Phase 6.5 root cause 3) --------------------
+# Both the Inno installer and install.ps1 place a GRAB\GRAB.lnk under the
+# per-user Start Menu Programs folder. Remove the shortcut AND the empty
+# containing folder. Best-effort; a stray file in the folder keeps it around.
+Section 'Start Menu shortcut'
+$startMenuCandidates = @(
+    [Environment]::GetFolderPath('Programs'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+    $env:GRAB_STARTMENU_OVERRIDE
+) | Where-Object { $_ } | Select-Object -Unique
+$smRemoved = $false
+foreach ($sm in $startMenuCandidates) {
+    if (-not (Test-Path -LiteralPath $sm)) { continue }
+    $grabDir = Join-Path $sm 'GRAB'
+    $lnk     = Join-Path $grabDir 'GRAB.lnk'
+    if (Test-Path -LiteralPath $lnk) {
+        try { Remove-Item -LiteralPath $lnk -Force -ErrorAction Stop; Ok "removed $lnk"; $smRemoved = $true } catch { Warn "couldn't remove ${lnk}: $_" }
+    }
+    if (Test-Path -LiteralPath $grabDir) {
+        $remaining = @(Get-ChildItem -LiteralPath $grabDir -Force -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) {
+            try { Remove-Item -LiteralPath $grabDir -Force -ErrorAction Stop; Ok "removed $grabDir" } catch { Warn "couldn't remove ${grabDir}: $_" }
+        }
+    }
+}
+if (-not $smRemoved) { Skip 'no Start Menu shortcut' }
 
 # --- 3. Autostart entries (shortcut + HKCU\Run + OneDrive-redirected) ---
 Section 'Autostart'

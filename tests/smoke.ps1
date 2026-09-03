@@ -2278,18 +2278,203 @@ Test 'utils.ps1 defines Get-LocalDesktopPath and Get-LocalStartupPath' {
     Assert-NotNull $p 'Get-LocalDesktopPath returned null'
 }
 
-Test 'install.ps1 writes desktop shortcut to local Desktop (not OneDrive)' {
-    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
-    # Must call Get-LocalDesktopPath, not [Environment]::GetFolderPath directly
-    # for the Desktop lookup.
-    if ($c -notmatch 'Get-LocalDesktopPath') {
-        throw 'install.ps1 must use Get-LocalDesktopPath so shortcuts land on the LOCAL Desktop (never OneDrive)'
+# --- Phase 6.5 root cause 2: Get-VisibleDesktopPath ---------------------
+Test 'Get-VisibleDesktopPath returns the Windows shell Desktop (OneDrive-safe)' {
+    Assert-NotNull (Get-Command Get-VisibleDesktopPath -ErrorAction SilentlyContinue) `
+        'Get-VisibleDesktopPath missing (needed so Desktop shortcuts land where users actually see them under OneDrive KFM)'
+    # With no override, should match whatever the shell reports (the user-
+    # visible desktop path -- OneDrive-redirected or not).
+    $prev = $env:GRAB_DESKTOP_OVERRIDE
+    Remove-Item Env:GRAB_DESKTOP_OVERRIDE -ErrorAction SilentlyContinue
+    try {
+        $p = Get-VisibleDesktopPath
+        Assert-NotNull $p 'Get-VisibleDesktopPath returned null'
+        $shell = [Environment]::GetFolderPath('Desktop')
+        Assert-Equal $shell $p 'Get-VisibleDesktopPath must return the shell Desktop (not a local override)'
+    } finally {
+        if ($prev) { $env:GRAB_DESKTOP_OVERRIDE = $prev }
     }
-    # And it should clean up stale OneDrive Desktop shortcuts.
+}
+Test 'Get-VisibleDesktopPath honors GRAB_DESKTOP_OVERRIDE (test hook)' {
+    $prev = $env:GRAB_DESKTOP_OVERRIDE
+    $fake = Join-Path $env:TEMP ("grab-vd-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Path $fake -Force | Out-Null
+    $env:GRAB_DESKTOP_OVERRIDE = $fake
+    try {
+        Assert-Equal $fake (Get-VisibleDesktopPath) 'GRAB_DESKTOP_OVERRIDE not honored'
+    } finally {
+        if ($prev) { $env:GRAB_DESKTOP_OVERRIDE = $prev } else { Remove-Item Env:GRAB_DESKTOP_OVERRIDE -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+Test 'Get-LocalStartupPath still refuses OneDrive-redirected Startup (Phase 6.5)' {
+    # The Startup shortcut is a belt-and-braces backup to HKCU\Run and
+    # OneDrive sync CAN quarantine it. Get-LocalStartupPath is our
+    # OneDrive-avoidance helper -- it must still return the local path.
+    # (Get-VisibleDesktopPath / VisibleStartMenuPath deliberately DO
+    # honour the shell folder.)
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+Get-LocalStartupPath[\s\S]{0,1000}Test-IsOneDrivePath') {
+        throw 'Get-LocalStartupPath must call Test-IsOneDrivePath so it refuses the OneDrive Startup path'
+    }
+}
+Test 'install.ps1 writes Desktop shortcut to VISIBLE Desktop (Phase 6.5 root cause 2)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    # Post-6.5 install must use Get-VisibleDesktopPath so KFM users see it.
+    if ($c -notmatch 'Get-VisibleDesktopPath') {
+        throw 'install.ps1 must use Get-VisibleDesktopPath so Desktop shortcuts render under OneDrive KFM'
+    }
+    # And it should still clean up stale OneDrive Desktop shortcuts from
+    # earlier install layouts.
     if ($c -notmatch 'OneDrive\\Desktop') {
         throw 'install.ps1 must delete stale grab.lnk from OneDrive\Desktop on install (migration cleanup)'
     }
 }
+Test 'Invoke-SelfHealSweep recreates Desktop shortcut on VISIBLE Desktop (Phase 6.5)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    # Pre-6.5 used Get-LocalDesktopPath (invisible under KFM). Post-6.5
+    # self-heal must prefer Get-VisibleDesktopPath.
+    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,8000}Get-VisibleDesktopPath') {
+        throw 'Invoke-SelfHealSweep must use Get-VisibleDesktopPath so the self-healed Desktop shortcut appears under OneDrive KFM'
+    }
+}
+
+# --- Phase 6.5 root cause 3: Start Menu shortcut ------------------------
+Test 'Set-StartMenuShortcut exists and writes to visible Start Menu path (Phase 6.5)' {
+    Assert-NotNull (Get-Command Set-StartMenuShortcut -ErrorAction SilentlyContinue) `
+        'Set-StartMenuShortcut missing (needed so Windows Search finds grab in the Start Menu)'
+    Assert-NotNull (Get-Command Get-StartMenuShortcutPath -ErrorAction SilentlyContinue)
+    Assert-NotNull (Get-Command Get-VisibleStartMenuPath  -ErrorAction SilentlyContinue)
+    # Path should be under the visible Start Menu folder (which is NOT
+    # OneDrive-redirected by default).
+    $prev = $env:GRAB_STARTMENU_OVERRIDE
+    $fake = Join-Path $env:TEMP ("grab-sm-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Path $fake -Force | Out-Null
+    $env:GRAB_STARTMENU_OVERRIDE = $fake
+    try {
+        $p = Get-StartMenuShortcutPath
+        Assert-Match $p 'GRAB\\GRAB\.lnk$' 'expected shortcut path to end in GRAB\GRAB.lnk'
+        # Verify the visible-start-menu path resolved through our override.
+        Assert-True ($p.StartsWith($fake, [System.StringComparison]::OrdinalIgnoreCase)) `
+            "expected shortcut path to start under $fake, got $p"
+        # Round-trip: Set true -> file exists; Set false -> file gone.
+        Set-StartMenuShortcut $true
+        Assert-PathExists $p 'Set-StartMenuShortcut $true did not create the .lnk'
+        Set-StartMenuShortcut $false
+        Assert-True (-not (Test-Path -LiteralPath $p)) 'Set-StartMenuShortcut $false did not remove the .lnk'
+    } finally {
+        if ($prev) { $env:GRAB_STARTMENU_OVERRIDE = $prev } else { Remove-Item Env:GRAB_STARTMENU_OVERRIDE -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+Test 'install.ps1 creates Start Menu entry via Set-StartMenuShortcut (Phase 6.5)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -notmatch 'Set-StartMenuShortcut\s+\$true') {
+        throw 'install.ps1 must call Set-StartMenuShortcut $true so dev-clone users get a Start Menu entry'
+    }
+}
+Test 'Invoke-SelfHealSweep recreates Start Menu shortcut when missing (Phase 6.5)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,10000}(Set-StartMenuShortcut|Get-StartMenuShortcutPath)') {
+        throw 'Invoke-SelfHealSweep must re-create a missing Start Menu shortcut so an uninstall + reinstall dance is not required'
+    }
+}
+Test 'uninstall.ps1 removes Start Menu shortcut + empty GRAB folder (Phase 6.5)' {
+    $c = Get-Content (Join-Path $repoRoot 'uninstall.ps1') -Raw
+    if ($c -notmatch 'Start Menu Programs' -and $c -notmatch 'GetFolderPath\(''Programs''\)') {
+        throw 'uninstall.ps1 must reference the Start Menu Programs folder for cleanup'
+    }
+    if ($c -notmatch 'GRAB\.lnk' -and $c -notmatch "'GRAB'") {
+        throw 'uninstall.ps1 must delete the GRAB Start Menu shortcut / folder'
+    }
+    if ($c -notmatch 'GRAB_STARTMENU_OVERRIDE') {
+        throw 'uninstall.ps1 must honor GRAB_STARTMENU_OVERRIDE so the Start Menu sweep is testable in isolation'
+    }
+}
+Test 'uninstall.ps1 sweeps BOTH visible and local Desktop shortcut (Phase 6.5 backward-compat)' {
+    $c = Get-Content (Join-Path $repoRoot 'uninstall.ps1') -Raw
+    # Pre-6.5 installs wrote to the local Desktop; post-6.5 writes to
+    # the visible (KFM) Desktop. Both must be swept.
+    if ($c -notmatch "GetFolderPath\('Desktop'\)") {
+        throw 'uninstall.ps1 must sweep [Environment]::GetFolderPath(''Desktop'') (visible Desktop, possibly OneDrive-redirected)'
+    }
+    if ($c -notmatch 'USERPROFILE\s+''Desktop''') {
+        throw 'uninstall.ps1 must sweep $env:USERPROFILE\Desktop (local, non-KFM Desktop) for backward compat with pre-6.5 installs'
+    }
+}
+
+# --- Phase 6.5 QA-2: portable-mode.flag ---------------------------------
+Test 'portable-mode.flag next to grab-app.vbs redirects AppData (Phase 6.5 QA-2)' {
+    # Simulate a portable-mode extract in a temp folder: drop grab-app.vbs +
+    # portable-mode.flag alongside a fake src/ dir, then re-run utils.ps1's
+    # AppData resolution logic in a child PowerShell so its $script:AppData
+    # is computed against that fake layout.
+    $sandbox = Join-Path $env:TEMP ("grab-portable-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Path (Join-Path $sandbox 'src') -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $srcRoot 'utils.ps1') -Destination (Join-Path $sandbox 'src\utils.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'grab-app.vbs') -Destination (Join-Path $sandbox 'grab-app.vbs') -Force -ErrorAction SilentlyContinue
+    Set-Content -Path (Join-Path $sandbox 'portable-mode.flag') -Value '' -Encoding UTF8
+    try {
+        $psExe = (Get-Process -Id $PID).Path
+        # Child must NOT inherit our override (which pins AppData elsewhere).
+        $probe = @"
+`$env:GRAB_APP_DATA_OVERRIDE = `$null
+. '$($sandbox -replace "'","''")\src\utils.ps1'
+Get-AppDataPath
+"@
+        $out = & $psExe -NoProfile -ExecutionPolicy Bypass -Command $probe 2>&1 | Out-String
+        $expected = Join-Path $sandbox 'grab-data'
+        Assert-Match $out ([regex]::Escape($expected)) `
+            "portable-mode.flag did not redirect AppData to <repo>\grab-data. Output:`n$out"
+    } finally {
+        Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# --- Phase 6.5 QA-3: Send-Toast tray fallback ---------------------------
+Test 'Send-Toast falls back to tray NotifyIcon balloon when BurntToast is unavailable (Phase 6.5 QA-3)' {
+    # Grep-level check first: the source must reference ShowBalloonTip in
+    # Send-Toast's body so any regression to a console-only fallback is
+    # caught even if the tests happen to run with BurntToast installed.
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+Send-Toast[\s\S]{0,2500}ShowBalloonTip') {
+        throw 'Send-Toast must call $script:Tray.ShowBalloonTip as the mid-tier fallback when BurntToast is missing (installer users have no BurntToast)'
+    }
+    # Live check: stub a NotifyIcon-shaped object and prove Send-Toast
+    # routes to it when BurntToast is (mocked) absent.
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    $stub = [pscustomobject]@{
+        Called = $false
+        Args   = $null
+    }
+    Add-Member -InputObject $stub -MemberType ScriptMethod -Name ShowBalloonTip -Value {
+        param($timeout, $title, $body, $icon)
+        $this.Called = $true
+        $this.Args = @{ timeout=$timeout; title=$title; body=$body; icon=$icon }
+    }
+    $prevTray = $script:Tray
+    $script:Tray = $stub
+    try {
+        # Force BurntToast lookup miss by pushing a name unlikely to exist.
+        Send-Toast 'phase65-test' 'balloon fallback' $null
+        # If BurntToast IS installed, Send-Toast returns via the first branch;
+        # in that case the stub won't fire. Accept either outcome but at
+        # least prove the code path exists and is callable without throwing.
+        if (Get-Module -ListAvailable -Name BurntToast) {
+            # Skip the strict assertion on machines that have BurntToast
+            # installed; the grep check above already proved the fallback
+            # branch exists in source.
+        } else {
+            Assert-True $stub.Called 'Send-Toast did not fall back to tray NotifyIcon balloon when BurntToast was absent'
+            Assert-Equal 'phase65-test'      $stub.Args.title
+            Assert-Equal 'balloon fallback'  $stub.Args.body
+        }
+    } finally {
+        $script:Tray = $prevTray
+    }
+}
+
+
 
 Test 'install.ps1 writes autostart to HKCU\Run and cleans stale OneDrive Startup' {
     $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
@@ -2311,27 +2496,28 @@ Test 'install.ps1 sets tray promotion registry key' {
     }
 }
 
-Test 'queue.ps1 Read-Queue checks WaitOne return value' {
+Test 'queue.ps1 Read-Queue checks lock return value (Phase 6.5)' {
     $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
-    # No more [void]$script:QueueMutex.WaitOne(...) discarding the return
-    if ($c -match '\[void\]\$script:QueueMutex\.WaitOne') {
-        throw 'Read-Queue must not discard the WaitOne return value with [void] -- audit P1-24'
+    # Phase 6.5 root cause 1: SemaphoreSlim replaces Mutex. No more
+    # [void]$script:Queue{Mutex,Lock}.WaitOne(...) discarding the return.
+    if ($c -match '\[void\]\$script:Queue(Mutex|Lock)\.Wait') {
+        throw 'Read-Queue must not discard the Wait return value with [void] -- audit P1-24'
     }
-    # And Read-Queue must contain "mutex timeout" logging on failure
-    if ($c -notmatch 'Read-Queue[\s\S]{0,600}mutex timeout') {
-        throw 'Read-Queue must log a warn + bail on WaitOne timeout instead of proceeding without the lock'
+    # And Read-Queue must contain "lock timeout" logging on failure
+    if ($c -notmatch 'Read-Queue[\s\S]{0,800}(mutex|lock) timeout') {
+        throw 'Read-Queue must log a warn + bail on Wait timeout instead of proceeding without the lock'
     }
 }
-Test 'queue.ps1 Write-Queue bails out on WaitOne timeout' {
+Test 'queue.ps1 Write-Queue bails out on lock timeout (Phase 6.5)' {
     $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
-    if ($c -notmatch 'Write-Queue[\s\S]{0,900}mutex timeout[\s\S]{0,200}skipping write') {
-        throw 'Write-Queue must skip the write on WaitOne timeout to avoid lost-update races (audit P0-7)'
+    if ($c -notmatch 'Write-Queue[\s\S]{0,1200}(mutex|lock) timeout[\s\S]{0,200}skipping write') {
+        throw 'Write-Queue must skip the write on Wait timeout to avoid lost-update races (audit P0-7)'
     }
 }
-Test 'queue mutating functions take the mutex (audit P0-7)' {
+Test 'queue mutating functions take the lock (audit P0-7)' {
     # Set-JobStatus, Cancel-QueueJob, Retry-QueueJob, Recover-OrphanedJobs,
     # Stop-AllJobs must all wrap their read-modify-write with the queue
-    # mutex. Uses AST to be robust against comments / whitespace.
+    # lock. Uses AST to be robust against comments / whitespace.
     $path = Join-Path $srcRoot 'queue.ps1'
     $tokens = $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
@@ -2344,14 +2530,118 @@ Test 'queue mutating functions take the mutex (audit P0-7)' {
         }, $true) | Select-Object -First 1
         if (-not $fn) { $missing += "$fname (function not found)"; continue }
         $body = $fn.Body.Extent.Text
-        # Must reference either _WithQueueMutex or QueueMutex.WaitOne
-        if ($body -notmatch '_WithQueueMutex' -and $body -notmatch 'QueueMutex\.WaitOne') {
+        # Must reference _WithQueueMutex (kept as function name) or the
+        # underlying lock (QueueLock/QueueMutex.Wait).
+        if ($body -notmatch '_WithQueueMutex' -and $body -notmatch 'Queue(Lock|Mutex)\.Wait') {
             $missing += $fname
         }
     }
     if ($missing.Count -gt 0) {
-        throw ("queue.ps1 functions missing mutex protection: " + ($missing -join ', '))
+        throw ("queue.ps1 functions missing lock protection: " + ($missing -join ', '))
     }
+}
+
+# --- Phase 6.5 root cause 1: SemaphoreSlim replaces Mutex ---------------
+Test 'queue lock is SemaphoreSlim, not Mutex (Phase 6.5)' {
+    Assert-True ($script:QueueLock -is [System.Threading.SemaphoreSlim]) `
+        "expected `$script:QueueLock to be SemaphoreSlim, got $($script:QueueLock.GetType().FullName)"
+    Assert-True ($script:RecentLock -is [System.Threading.SemaphoreSlim]) `
+        "expected `$script:RecentLock to be SemaphoreSlim, got $($script:RecentLock.GetType().FullName)"
+    # And the source must not re-introduce a Mutex instantiation under the
+    # same variable names. Comment references (design docs) are allowed --
+    # we scan non-comment lines only.
+    $offenders = @()
+    $lines = Get-Content (Join-Path $srcRoot 'queue.ps1')
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match '^\s*#') { continue }
+        # Look for actual Mutex object construction, not the word in prose.
+        if ($line -match 'New-Object\s+System\.Threading\.Mutex' -or
+            $line -match '\[System\.Threading\.Mutex\]::new' -or
+            $line -match '\$script:QueueMutex\s*=' -or
+            $line -match '\$script:RecentMutex\s*=') {
+            $offenders += ("line " + ($i + 1) + ": " + $line.Trim())
+        }
+    }
+    if ($offenders.Count -gt 0) {
+        throw ("queue.ps1 must not use System.Threading.Mutex for queue/recent locks (root cause 1: thread affinity). Offenders:`n" + ($offenders -join "`n"))
+    }
+}
+
+Test 'queue lock Wait+Release works across threads (Phase 6.5)' {
+    # Regression for the 2026-09-03 18:27:48 tick crash. With Mutex,
+    # Wait on thread A + Release on thread B threw
+    # "Object synchronization method was called from an unsynchronized
+    # block of code" and killed the tick timer. SemaphoreSlim must let
+    # this cross-thread hand-off succeed silently.
+    #
+    # NOTE: PS 5.1 can't cleanly run scriptblocks on threadpool threads
+    # (no default runspace on those threads), so we do the cross-thread
+    # hop through a pure-.NET helper (Add-Type'd once at first use). The
+    # helper takes a SemaphoreSlim and returns "OK" or the exception
+    # message -- no PS scriptblock crosses the thread boundary.
+    if (-not ('GrabTests.CrossThreadHelper' -as [type])) {
+        Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+namespace GrabTests {
+  public static class CrossThreadHelper {
+    // Release the given semaphore from a threadpool thread. Returns "OK"
+    // on success, or the exception message otherwise. Never throws.
+    public static string ReleaseOnPool(SemaphoreSlim s) {
+      var task = Task.Run(() => {
+        try { s.Release(); return "OK"; }
+        catch (Exception ex) { return ex.GetType().Name + ": " + ex.Message; }
+      });
+      if (!task.Wait(2000)) return "TIMEOUT";
+      return task.Result;
+    }
+  }
+}
+'@
+    }
+    $lock = [System.Threading.SemaphoreSlim]::new(1, 1)
+    Assert-True ($lock.Wait([TimeSpan]::FromSeconds(1))) 'baseline Wait failed'
+    $result = [GrabTests.CrossThreadHelper]::ReleaseOnPool($lock)
+    Assert-Equal 'OK' $result "cross-thread Release failed: $result"
+    # And we should now be able to Wait again from the current thread.
+    Assert-True ($lock.Wait([TimeSpan]::FromSeconds(1))) 'lock stuck after cross-thread Release'
+    [void]$lock.Release()
+}
+
+Test 'tick-timer ReleaseMutex crash pattern cannot recur (Phase 6.5 regression)' {
+    # Direct regression for the live log line at 2026-09-03 18:27:48:
+    #   tick error: Exception calling "ReleaseMutex" with "0" argument(s):
+    #   "Object synchronization method was called from an unsynchronized
+    #    block of code."
+    # Under Mutex, cross-thread Release threw ApplicationException. Under
+    # SemaphoreSlim, no exception. We prove two properties:
+    #   1. Same-thread re-entry into _WithQueueMutex does NOT deadlock
+    #      (SemaphoreSlim isn't reentrant, so we layered a thread-local
+    #      owner check on top).
+    #   2. Cross-thread Wait+Release on the underlying semaphore succeeds
+    #      (proven by the CrossThreadHelper above).
+    # PS 5.1 doesn't let us drive _WithQueueMutex from a threadpool thread
+    # (scriptblocks need a runspace), but the point of the fix is that
+    # SemaphoreSlim doesn't care WHICH thread calls Release -- so if the
+    # helper above passes, and the re-entrant path below passes, the tick
+    # crash cannot recur.
+    $reentryErr = $null
+    try {
+        _WithQueueMutex -Name 'phase65-regression' -Action {
+            # Nested calls that USED to work under Mutex (re-entrant) must
+            # still work under SemaphoreSlim + our owner-thread tracker:
+            try { $null = @(Read-Queue) } catch { $reentryErr = "re-entrant Read-Queue: $($_.Exception.Message)" }
+            # Also test nested _WithQueueMutex (Set-JobStatus does this).
+            try { _WithQueueMutex -Name 'phase65-nested' -Action { } }
+            catch { $reentryErr = "nested _WithQueueMutex: $($_.Exception.Message)" }
+        }
+    } catch { $reentryErr = "outer _WithQueueMutex: $($_.Exception.Message)" }
+    if ($reentryErr) { throw ("phase 6.5 regression: " + $reentryErr) }
+    # And the semaphore must NOT be stuck after the wrapped call returns.
+    Assert-True ($script:QueueLock.Wait([TimeSpan]::FromSeconds(1))) 'queue lock still held after _WithQueueMutex returned'
+    [void]$script:QueueLock.Release()
 }
 
 Test 'settings.ps1 VersionLabel uses Get-GrabVersion (audit P0-4, P1-13)' {
@@ -2409,22 +2699,31 @@ Test 'grab-app.ps1 calls SetCurrentProcessExplicitAppUserModelID (N1)' {
 
 # --- N3 HKCU\Run round-trip -----------------------------------------------
 Test 'HKCU Run entry is created by Set-Autostart(true) (N3)' {
-    $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $name  = 'GRAB'
-    $prior = try { (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name } catch { $null }
+    # Phase 6.5: route through GRAB_RUN_KEY_OVERRIDE so this never touches
+    # the user's real HKCU\Run entry (matches the audit P2 #61 pattern
+    # already in use by Set-AutostartRegistry).
+    $prevRunKey = $env:GRAB_RUN_KEY_OVERRIDE
+    $fake = 'HKCU:\Software\grab-app-tests\phase65-n3-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '\Run'
+    New-Item -Path $fake -Force | Out-Null
+    $env:GRAB_RUN_KEY_OVERRIDE = $fake
     try {
         # Set-Autostart wires both the shortcut + registry, but the registry
         # is now the primary. Prove the reg entry appears after $true.
         Set-Autostart $true
-        $val = (Get-ItemProperty -Path $key -Name $name -ErrorAction Stop).$name
+        $val = (Get-ItemProperty -Path $fake -Name 'GRAB' -ErrorAction Stop).GRAB
         Assert-NotNull $val 'HKCU\Run\GRAB missing after Set-Autostart $true'
         Assert-Match $val 'grab-app\.(ps1|vbs)'
     } finally {
-        if ($null -ne $prior) {
-            Set-ItemProperty -Path $key -Name $name -Value $prior -Force
-        } else {
-            Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue
-        }
+        if ($prevRunKey) { $env:GRAB_RUN_KEY_OVERRIDE = $prevRunKey } else { Remove-Item Env:GRAB_RUN_KEY_OVERRIDE -ErrorAction SilentlyContinue }
+        # Clean the whole fake subtree.
+        try {
+            $parent = Split-Path $fake -Parent
+            if (Test-Path $parent) { Remove-Item $parent -Recurse -Force -ErrorAction SilentlyContinue }
+            $tests = 'HKCU:\Software\grab-app-tests'
+            if ((Test-Path $tests) -and (-not @(Get-ChildItem $tests -ErrorAction SilentlyContinue))) {
+                Remove-Item $tests -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
     }
 }
 
@@ -2659,19 +2958,25 @@ Test 'Log folder pruned to 30 files max (audit P1-23)' {
     }
 }
 
-# --- P1-24 WaitOne timeout gated ------------------------------------------
-Test 'no queue.ps1 site calls WaitOne(2000) without checking the return (audit P1-24)' {
+# --- P1-24 lock timeout gated ---------------------------------------------
+Test 'no queue.ps1 site takes the lock without checking the return (audit P1-24)' {
     $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
-    # All mutating sites now go through _WithQueueMutex OR use WaitOne(2000)
-    # inside a `$acquired = try { ... } catch [AbandonedMutexException] {...}`
-    # pattern. Any bare WaitOne(2000) without the acquired-check is a bug.
-    $matches = [regex]::Matches($c, 'QueueMutex\.WaitOne\(2000\)')
-    foreach ($m in $matches) {
-        $ctxStart = [Math]::Max(0, $m.Index - 200)
-        $ctxLen   = [Math]::Min($c.Length - $ctxStart, 400)
-        $ctx = $c.Substring($ctxStart, $ctxLen)
-        if ($ctx -notmatch '\$acquired' -and $ctx -notmatch '_WithQueueMutex') {
-            throw "queue.ps1@$($m.Index): WaitOne(2000) not gated on an `$acquired check"
+    # Phase 6.5 root cause 1: SemaphoreSlim replaces Mutex. All acquires
+    # now flow through _TryAcquireQueueLock / _TryAcquireRecentLock, which
+    # centralise the timeout handling. Prove there are no bare
+    # QueueLock.Wait(...) or Mutex.WaitOne(...) call sites that discard
+    # the return value.
+    foreach ($pattern in @('QueueLock\.Wait\(', 'RecentLock\.Wait\(', 'QueueMutex\.WaitOne\(', 'RecentMutex\.WaitOne\(')) {
+        $matches = [regex]::Matches($c, $pattern)
+        foreach ($m in $matches) {
+            $ctxStart = [Math]::Max(0, $m.Index - 250)
+            $ctxLen   = [Math]::Min($c.Length - $ctxStart, 500)
+            $ctx = $c.Substring($ctxStart, $ctxLen)
+            # Accept the helper's own body, or an $acquired / $ok / $kind guard.
+            if ($ctx -notmatch '_TryAcquire(Queue|Recent)Lock' -and
+                $ctx -notmatch '\$acquired' -and $ctx -notmatch '\$ok' -and $ctx -notmatch '\$kind') {
+                throw "queue.ps1@$($m.Index): $pattern not gated on a return-value check"
+            }
         }
     }
 }
@@ -2824,7 +3129,10 @@ Test 'install.ps1 python scripts-dir probe uses 2>$null (audit P2-35)' {
 # --- P2-36 recent mutex ---------------------------------------------------
 Test 'queue.ps1 defines _WithRecentMutex + Append-Recent uses it (audit P2-36)' {
     $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
-    Assert-Match $c 'GrabAppRecentMutex'
+    # Phase 6.5 root cause 1: named Global\ mutex is gone (see design
+    # comment above $script:RecentLock). Instead assert the semaphore lock
+    # exists + the wrapper function.
+    Assert-Match $c '\$script:RecentLock\s*=\s*\[System\.Threading\.SemaphoreSlim\]'
     Assert-Match $c 'function\s+_WithRecentMutex'
     if ($c -notmatch 'function\s+Append-Recent[\s\S]{0,600}_WithRecentMutex') {
         throw 'Append-Recent must be wrapped in _WithRecentMutex to avoid races with Clear-Recent'
@@ -4344,14 +4652,32 @@ Test 'winget version manifest has PackageIdentifier + PackageVersion' {
     Assert-Match $c 'ManifestType:\s*version'
 }
 
-Test 'winget installer.yaml has correct publisher pattern + URL + sha256 placeholder' {
+Test 'winget installer.yaml has correct publisher pattern + URL + sha256 (Phase 6.5)' {
     $c = Get-Content (Join-Path $wingetRoot 'Imadjinnation.GRAB.installer.yaml') -Raw
     Assert-Match $c 'PackageIdentifier:\s*Imadjinnation\.GRAB'
     Assert-Match $c 'InstallerType:\s*inno'
     Assert-Match $c 'Scope:\s*user'
     Assert-Match $c 'InstallerUrl:\s*https://github\.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v0\.3\.0/GRAB-Setup\.exe'
-    Assert-Match $c 'InstallerSha256:\s*__SHA256_PLACEHOLDER__'
+    # Phase 6.5 QA-1: accept EITHER the pre-build placeholder OR a real
+    # SHA256 (any 64-hex string). The placeholder means "this manifest
+    # ships in the repo before the build runs"; a real hash means the
+    # Phase 6 build filled it in from SHA256SUMS.txt.
+    Assert-Match $c 'InstallerSha256:\s*(__SHA256_PLACEHOLDER__|[A-Fa-f0-9]{64})'
     Assert-Match $c '/VERYSILENT'
+    # When it's a real hash, it MUST match the entry in dist/SHA256SUMS.txt
+    # for GRAB-Setup.exe -- catches the case where the winget manifest was
+    # regenerated but from stale binaries. Only enforced if BOTH files exist
+    # (the manifest is a repo artifact so it's always present; SHA256SUMS.txt
+    # is a build artifact so it's only present after a real build).
+    $sumsPath = Join-Path $repoRoot 'dist\SHA256SUMS.txt'
+    if ($c -match 'InstallerSha256:\s*([A-Fa-f0-9]{64})' -and (Test-Path -LiteralPath $sumsPath)) {
+        $manifestHash = $Matches[1].ToLower()
+        $sums = Get-Content -LiteralPath $sumsPath -Raw
+        if ($sums -match '(?m)^([A-Fa-f0-9]{64})\s+GRAB-Setup\.exe\s*$') {
+            $sumsHash = $Matches[1].ToLower()
+            Assert-Equal $sumsHash $manifestHash "winget InstallerSha256 does not match dist/SHA256SUMS.txt entry for GRAB-Setup.exe"
+        }
+    }
 }
 
 Test 'winget locale.en-US.yaml has Publisher / License / Tags / Moniker' {
@@ -4474,7 +4800,9 @@ Test 'README references all 5 install paths' {
     Assert-Match $c 'winget install imadjinnation\.grab'
     Assert-Match $c 'scoop install grab'
     Assert-Match $c 'GRAB-Setup\.exe'
-    Assert-Match $c 'GRAB-Portable\.zip'
+    # Phase 6.5 non-blocker: README now references the versioned filename
+    # (GRAB-Portable-v0.3.0.zip) so the link matches the actual Release asset.
+    Assert-Match $c 'GRAB-Portable(-v[0-9]+\.[0-9]+\.[0-9]+)?\.zip'
     Assert-Match $c 'git clone https://github\.com/imadjinnation/GRAB-Free-Universal-Media-Downloader'
 }
 

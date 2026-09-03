@@ -23,7 +23,7 @@ Legend: **✓** built · **·** planned · **★** entry point
 | Path | Status | Purpose |
 |---|---|---|
 | `tests/README.md` | ✓ | How to run tests; the "green smoke.ps1 before checkpoint" rule; PS gotchas learned |
-| `tests/smoke.ps1` | ✓ | 400+-test zero-dependency harness (parse, XAML load, function exports, config/queue/recent CRUD, portability, install, a11y static-scan, adaptive-tick behavior) |
+| `tests/smoke.ps1` | ✓ | 480+-test zero-dependency harness (parse, XAML load, function exports, config/queue/recent CRUD, portability, install, a11y static-scan, adaptive-tick behavior, Phase 6.5 root-cause regressions) |
 
 ## `src/` — PowerShell source
 
@@ -53,7 +53,6 @@ Legend: **✓** built · **·** planned · **★** entry point
 | `assets/README.md` | ✓ | Asset conventions + license note |
 | `assets/gallery-dl-config.json` | ✓ | Per-extractor directory template overrides for gallery-dl (fixes chapter collisions on sites like allporncomic) |
 | `assets/icon.ico` | ✓ | System tray icon (multi-res 16 + 32 + 48 px) |
-| `assets/icon-32.png` | ✓ | Popup accent dot / small logo |
 | `assets/scanlines.png` | ✓ | Legacy CRT overlay tile (runtime now uses a LinearGradientBrush directly) |
 | `assets/fonts/` | ✓ | Bundled TTFs — Silkscreen (wordmark), VT323 (tabs/labels), Inter (body) |
 | `assets/favicon.png` | · | Web-facing icon (docs, README) |
@@ -68,6 +67,7 @@ Legend: **✓** built · **·** planned · **★** entry point
 | `docs/config-reference.md` | ✓ | Every config.json key + default + effect |
 | `docs/audit-v0.2.2.md` | ✓ | v0.2.2 audit findings + progress log |
 | `docs/audit-v0.3.0-pass2.md` | ✓ | v0.3.0 second-pass audit (80 findings; closed in Phase 4.5) |
+| `docs/smartscreen.md` | ✓ | Why the installer/portable-zip triggers SmartScreen on first run + how to safely accept the dialog + how to verify SHA256 |
 | `docs/troubleshooting.md` | · | Common errors + fixes (cookies, ffmpeg missing, etc.) |
 | `docs/screenshots.md` | · | Visual walkthrough (added in CP5 after UI is stable) |
 | `docs/i18n.md` | · | Placeholder for future i18n effort (audit v0.3.0-pass2 finding 57) |

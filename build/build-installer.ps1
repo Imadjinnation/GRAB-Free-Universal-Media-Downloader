@@ -390,8 +390,35 @@ Source: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText((Join-Path $script:Payload 'PORTABLE.txt'), $portableTxt, $utf8NoBom)
 
-    # Compress-Archive is Windows-native, dependency-free.
-    Compress-Archive -Path (Join-Path $script:Payload '*') -DestinationPath $zip -CompressionLevel Optimal
+    # Phase 6.5 optimisation: prefer `7z.exe a -mx9 -m0=LZMA2` (~30% smaller
+    # than Compress-Archive's Deflate) when 7-Zip is available -- which it
+    # always is here, because Get-Ffmpeg already installs it. Fall back to
+    # Compress-Archive when 7z isn't on PATH (e.g. -SkipDownload runs
+    # against a bin/ folder someone else populated).
+    $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+    if (-not $sevenZip) {
+        $probe = "$env:ProgramFiles\7-Zip\7z.exe"
+        if (Test-Path -LiteralPath $probe) { $sevenZip = [pscustomobject]@{ Source = $probe } }
+    }
+    if ($sevenZip) {
+        # 7z a: create archive. Args:
+        #   -tzip     -- zip format (not .7z; users expect a portable zip)
+        #   -mx9      -- ultra compression
+        #   -m0=LZMA2 -- LZMA2 codec inside the zip container
+        # A .zip file with LZMA2 needs a modern zip tool to extract; Windows
+        # 11 File Explorer handles it, and 7-Zip / WinRAR obviously do.
+        # Trailing `.\*` inside a subshell would be simpler but PowerShell
+        # doesn't switch cwd for us; use the payload path explicitly.
+        $args = @('a', '-tzip', '-mx9', '-m0=LZMA2', $zip, (Join-Path $script:Payload '*'))
+        & $sevenZip.Source @args | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Warn "7z pack exit $LASTEXITCODE; falling back to Compress-Archive"
+            Compress-Archive -Path (Join-Path $script:Payload '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+        }
+    } else {
+        Warn '7-Zip not found; using Compress-Archive (Deflate) -- expect ~30% larger portable zip'
+        Compress-Archive -Path (Join-Path $script:Payload '*') -DestinationPath $zip -CompressionLevel Optimal
+    }
     $size = (Get-Item -LiteralPath $zip).Length
     Ok "portable zip: $zip ($([math]::Round($size/1MB,1))MB)"
 }

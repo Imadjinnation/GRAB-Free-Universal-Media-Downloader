@@ -35,7 +35,7 @@ Both routes install a private copy under your user profile -- no admin, no UAC p
 **Direct download** (from the [latest release](https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/latest)):
 
 - **GRAB-Setup.exe** -- installer wizard. Per-user by default; asks before autostart / desktop icon.
-- **GRAB-Portable.zip** -- extract-and-run. No install, no admin. Drop a `portable-mode.flag` next to `grab-app.vbs` to keep config alongside the binaries (USB-stick style).
+- **GRAB-Portable-v0.3.0.zip** -- extract-and-run. No install, no admin. Drop a `portable-mode.flag` next to `grab-app.vbs` to keep config alongside the binaries (USB-stick style).
 
 **Developers** -- clone the repo and use the classic bootstrapper:
 

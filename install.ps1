@@ -246,20 +246,34 @@ Section 'Desktop shortcuts'
 # $WshShell variable below is kept purely for the local Make-Shortcut
 # helper's back-compat; it will be released in a finally at bottom.
 $WshShell = New-Object -ComObject WScript.Shell
-# v0.3.0: always target the LOCAL Desktop, never OneDrive-redirected. Users
-# reported the desktop icon vanishing after sync events; the fix is to not
-# put the shortcut into OneDrive in the first place.
-$Desktop = Get-LocalDesktopPath
+# Phase 6.5 root cause 2: the desktop shortcut must land on the VISIBLE
+# desktop. Under Known Folder Move, that IS the OneDrive-redirected path
+# (`C:\Users\<user>\OneDrive\Desktop`); writing to `C:\Users\<user>\Desktop`
+# hides the shortcut because Explorer no longer shows that folder.
+# Get-VisibleDesktopPath returns whatever `[Environment]::GetFolderPath('Desktop')`
+# reports, OneDrive or not.
+$Desktop = Get-VisibleDesktopPath
 $appEntry = Join-Path $script:Root 'grab-app.ps1'
 $vbsEntry = Join-Path $script:Root 'grab-app.vbs'
 # Audit P2-33: the drag-drop launcher (src\_drop_.bat) shipped with v0.1
 # and was removed in v0.2 when the tray took over the paste flow -- the
 # variable that referenced it was dead code and has been removed.
 
-# Migration cleanup: if the user had prior installs, they may have grab.lnk /
-# grab Downloads.lnk on the OneDrive Desktop. Remove them so we don't end up
-# with duplicate shortcuts (one live at local Desktop, one stale at
-# OneDrive\Desktop that no longer targets a live .ps1).
+# Migration cleanup (Phase 6.5): also sweep the LOCAL (non-KFM) Desktop path
+# in case a pre-6.5 install landed the shortcut there. Explorer wouldn't
+# have shown it under KFM, but removing it keeps the tree tidy.
+$localDesktopLegacy = Get-LocalDesktopPath
+if ($localDesktopLegacy -and $localDesktopLegacy -ne $Desktop -and (Test-Path -LiteralPath $localDesktopLegacy)) {
+    foreach ($stale in @('grab.lnk','grab Downloads.lnk')) {
+        $p = Join-Path $localDesktopLegacy $stale
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+            Ok "removed stale local Desktop shortcut ($stale)"
+        }
+    }
+}
+# Also sweep OneDrive\Desktop as a defensive step -- it may still be
+# reachable even when the shell folder resolves elsewhere (multi-user machines).
 $oneDriveDesktop = Join-Path $env:USERPROFILE 'OneDrive\Desktop'
 if ($Desktop -ne $oneDriveDesktop -and (Test-Path -LiteralPath $oneDriveDesktop)) {
     foreach ($stale in @('grab.lnk','grab Downloads.lnk')) {
@@ -310,6 +324,18 @@ if (Test-Path -LiteralPath $vbsEntry) {
 # on the desktop for the same app was cluttery -- the tray menu now has an
 # "Open downloads" item that supersedes it. The tray's self-heal sweep
 # deletes stale copies from prior installs (see Invoke-SelfHealSweep).
+
+# --- Start Menu shortcut (Phase 6.5 root cause 3) -------------------------
+# Dev-clone installs never got a Start Menu entry, so Windows Search
+# couldn't find "grab". Set-StartMenuShortcut writes into
+# %APPDATA%\Microsoft\Windows\Start Menu\Programs\GRAB\GRAB.lnk (the same
+# location the Inno installer targets via its {group} shortcut) so both
+# distribution paths surface identically.
+Section 'Start Menu shortcut'
+try {
+    Set-StartMenuShortcut $true
+    Ok "Start Menu entry: $(Get-StartMenuShortcutPath)"
+} catch { Warn "Set-StartMenuShortcut failed: $($_.Exception.Message)" }
 
 # --- Autostart entry (opt-out via -NoStartup) -----------------------------
 # v0.3.0: HKCU\Run is the primary (survives OneDrive folder-sync tricks). We

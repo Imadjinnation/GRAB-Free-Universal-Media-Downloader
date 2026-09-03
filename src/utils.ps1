@@ -11,9 +11,18 @@ $script:GrabVersion = '0.3.0'
 
 function Get-GrabVersion { return $script:GrabVersion }
 
-# App-data root. Override with $env:GRAB_APP_DATA_OVERRIDE for tests / power-users.
+# App-data root. Precedence:
+#   1. $env:GRAB_APP_DATA_OVERRIDE   -- tests / power users
+#   2. portable-mode.flag alongside grab-app.vbs -- USB-stick / portable
+#      zip use. Every stateful file (config, queue, recent, logs, done-archive)
+#      lives next to the binaries so the whole folder can be moved.
+#      Documented in PORTABLE.txt inside the portable zip; the QA-flagged
+#      Phase 6 audit noted the flag was documented but never wired.
+#   3. Default: %APPDATA%\grab-app\
 $script:AppData = if ($env:GRAB_APP_DATA_OVERRIDE) {
     $env:GRAB_APP_DATA_OVERRIDE
+} elseif (Test-Path -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'portable-mode.flag')) {
+    Join-Path (Split-Path $PSScriptRoot -Parent) 'grab-data'
 } else {
     Join-Path $env:APPDATA 'grab-app'
 }
@@ -152,18 +161,57 @@ function Ensure-WpfLoaded {
 }
 
 # ---------- OneDrive-safe local user folders ------------------------------
-# Windows can redirect Desktop / Documents / Startup into OneDrive. When that
-# happens, shell:startup shortcuts get sync-shuffled and sometimes silently
-# vanish (the shipping v0.2.2 desktop icon disappeared for exactly this
-# reason). These helpers return the REAL local folder path even when the
-# Shell has redirected the well-known folder to OneDrive.
+# Windows can redirect Desktop / Documents / Startup into OneDrive. The
+# correct policy DEPENDS on the shortcut's purpose:
+#
+#   * Desktop shortcut (Get-VisibleDesktopPath) -- the user needs to SEE
+#     it. Whatever `[Environment]::GetFolderPath('Desktop')` returns IS
+#     the desktop Windows renders (OneDrive-redirected or not); writing
+#     elsewhere hides the shortcut. Phase 6.5 root cause 2: pre-6.5's
+#     Get-LocalDesktopPath refused the OneDrive path and wrote to
+#     `C:\Users\<user>\Desktop`, which Explorer no longer shows once
+#     Known-Folder-Move is on -- so the user never saw the shortcut.
+#
+#   * Startup shortcut (Get-LocalStartupPath) -- OneDrive sync can quarantine
+#     or delete shell:startup shortcuts. HKCU\Run is now our primary
+#     autostart path (see Set-AutostartRegistry); this helper is only used
+#     for the belt-and-braces backup shortcut. Refusing the OneDrive path
+#     here is still correct.
+#
+#   * Start Menu shortcut (Get-VisibleStartMenuPath) -- Windows never
+#     redirects the per-user Start Menu into OneDrive by default, so this
+#     just returns %APPDATA%\Microsoft\Windows\Start Menu\Programs.
 function Test-IsOneDrivePath([string]$path) {
     if (-not $path) { return $false }
     return ($path -match '\\OneDrive(\\|$)|\\Dropbox(\\|$)|\\iCloudDrive(\\|$)')
 }
+function Get-VisibleDesktopPath {
+    # Return whatever the Windows shell reports as Desktop. When Known Folder
+    # Move is on, that's the OneDrive-redirected path -- and that IS the
+    # visible desktop, so we must write there for the shortcut to appear.
+    # Test-only override lets the automated uninstall suite point elsewhere
+    # without touching the user's real Desktop.
+    if ($env:GRAB_DESKTOP_OVERRIDE) { return $env:GRAB_DESKTOP_OVERRIDE }
+    $shell = [Environment]::GetFolderPath('Desktop')
+    if ($shell -and (Test-Path -LiteralPath $shell)) { return $shell }
+    # Fallback: local Desktop (very rare -- shell folder is nearly always set).
+    return (Join-Path $env:USERPROFILE 'Desktop')
+}
+function Get-VisibleStartMenuPath {
+    # Per-user Start Menu Programs folder. Windows does NOT redirect this
+    # into OneDrive by default, so the plain shell path is always visible.
+    # Test hook mirrors the pattern in Get-LocalStartupPath.
+    if ($env:GRAB_STARTMENU_OVERRIDE) { return $env:GRAB_STARTMENU_OVERRIDE }
+    $shell = [Environment]::GetFolderPath('Programs')
+    if ($shell -and (Test-Path -LiteralPath $shell)) { return $shell }
+    return (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+}
 function Get-LocalDesktopPath {
-    # Prefer the shell folder if it isn't redirected. Otherwise fall back to
-    # $env:USERPROFILE\Desktop -- the true local path Windows guarantees.
+    # DEPRECATED (Phase 6.5): prefer Get-VisibleDesktopPath for shortcut
+    # creation. Kept for backward-compat with older callers + so uninstall
+    # can still sweep any stale grab.lnk left in this non-redirected path
+    # by pre-6.5 installs. Refuses the OneDrive path and returns the local
+    # `C:\Users\<user>\Desktop` -- which under KFM is INVISIBLE to Explorer.
     $shell = [Environment]::GetFolderPath('Desktop')
     if ($shell -and -not (Test-IsOneDrivePath $shell)) { return $shell }
     $local = Join-Path $env:USERPROFILE 'Desktop'
@@ -261,6 +309,55 @@ function Set-AutostartRegistry([bool]$enable) {
     } catch { Log-Warn "Set-AutostartRegistry ($enable) failed: $($_.Exception.Message)" }
 }
 
+# ---------- Start Menu shortcut (Phase 6.5 root cause 3) -----------------
+# Dev-clone install.ps1 wrote only Desktop + Startup shortcuts, so Windows
+# Search never found "grab" in the Start Menu. The Inno installer already
+# writes a Start Menu entry via its [Icons] section, but the pip-and-repo
+# install path needs the same guarantee. Set-StartMenuShortcut centralises
+# it so install.ps1 + Invoke-SelfHealSweep + uninstall.ps1 all use one
+# source of truth for the shortcut path.
+function Get-StartMenuShortcutPath {
+    # Nest inside a GRAB\ folder for consistency with the Inno installer's
+    # {group}\GRAB shortcut placement. Windows Search matches on both the
+    # folder name and the .lnk basename so users can find it either way.
+    return (Join-Path (Get-VisibleStartMenuPath) 'GRAB\GRAB.lnk')
+}
+function Set-StartMenuShortcut([bool]$enable) {
+    $lnk = Get-StartMenuShortcutPath
+    $dir = Split-Path -Parent $lnk
+    try {
+        if ($enable) {
+            $repoRoot = Split-Path $PSScriptRoot -Parent
+            $vbs      = Join-Path $repoRoot 'grab-app.vbs'
+            $entry    = Join-Path $repoRoot 'grab-app.ps1'
+            $grabIco  = Join-Path $repoRoot 'assets\icon.ico'
+            $iconLoc  = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { '' }
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            if (Test-Path -LiteralPath $vbs) {
+                New-GrabShortcut -Path $lnk -Target 'wscript.exe' `
+                    -Arguments ('"' + $vbs + '"') `
+                    -WorkingDirectory $repoRoot -IconLocation $iconLoc `
+                    -Description 'Launch the grab tray app'
+            } else {
+                New-GrabShortcut -Path $lnk -Target 'powershell.exe' `
+                    -Arguments ('-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"') `
+                    -WorkingDirectory $repoRoot -IconLocation $iconLoc `
+                    -Description 'Launch the grab tray app'
+            }
+        } else {
+            if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
+            # Remove the containing GRAB\ folder only if empty (respects any
+            # user-added items -- rare, but polite).
+            if (Test-Path -LiteralPath $dir) {
+                $remaining = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)
+                if ($remaining.Count -eq 0) {
+                    Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    } catch { Log-Warn "Set-StartMenuShortcut ($enable) failed: $($_.Exception.Message)" }
+}
+
 # ---------- Config load / save --------------------------------------------
 
 function Get-Config {
@@ -278,6 +375,8 @@ function Get-Config {
             toastsEnabled        = $true
             popupPositionX       = $null
             popupPositionY       = $null
+            popupWidth           = $null
+            popupHeight          = $null
             firstRunComplete     = $false
             # Safety / privacy
             sensitiveByDefault   = $false                 # every download routes to .private
@@ -373,6 +472,15 @@ function Get-Config {
     if (-not (& $hasProp $cfg 'migrationV030PromptShown')) {
         $cfg | Add-Member -MemberType NoteProperty -Name migrationV030PromptShown -Value $false -Force
     }
+    # v0.3.0 audit-pass2 finding #77 (persist popup size across sessions).
+    # popup.ps1's Add_SizeChanged handler writes these; without back-fill the
+    # very first Show-Popup after upgrade throws "property cannot be found".
+    if (-not (& $hasProp $cfg 'popupWidth')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name popupWidth -Value $null -Force
+    }
+    if (-not (& $hasProp $cfg 'popupHeight')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name popupHeight -Value $null -Force
+    }
     # Version migration: if the on-disk config predates the current grab
     # release, bump its version stamp and persist. Prevents drift like the
     # v0.1.0 -> v0.2.2 gap that made every audit start with a stale config.
@@ -402,7 +510,20 @@ function Set-Config([object]$config) {
 
 function Update-Config([hashtable]$updates) {
     $cfg = Get-Config
-    foreach ($key in $updates.Keys) { $cfg.$key = $updates[$key] }
+    # Defensive: PSCustomObject throws on unknown property write. If Get-Config's
+    # back-fill list ever falls behind (a caller adds a new key, forgets to add
+    # the back-fill), Add-Member first so the assignment succeeds instead of
+    # taking down whichever tray timer or UI handler made the call.
+    foreach ($key in $updates.Keys) {
+        $exists = $false
+        foreach ($p in $cfg.PSObject.Properties.Name) {
+            if ($p -ieq $key) { $exists = $true; break }
+        }
+        if (-not $exists) {
+            $cfg | Add-Member -MemberType NoteProperty -Name $key -Value $null -Force
+        }
+        $cfg.$key = $updates[$key]
+    }
     Set-Config $cfg
     return $cfg
 }
@@ -652,24 +773,62 @@ function Log-Warn ([string]$msg) { Write-Log 'WARN'  $msg }
 function Log-Err  ([string]$msg) { Write-Log 'ERROR' $msg }
 
 # ---------- Toast notifications -------------------------------------------
-# BurntToast preferred; falls back to console write.
+# Precedence:
+#   1. BurntToast (nicest, action-button-capable) -- only present when the
+#      install.ps1 flow ran, which is skipped by the Phase 5.5 installer /
+#      portable zip since we no longer require Python.
+#   2. Tray NotifyIcon.ShowBalloonTip -- Phase 6.5 QA-3 fix. Works in every
+#      distribution channel: installer, portable zip, dev clone. The
+#      `$script:Tray` variable is set in tray.ps1's Start-Tray and lives
+#      at script scope shared by every dot-sourced src/*.ps1 (via
+#      grab-app.ps1's dot-source chain).
+#   3. Console (Write-Host magenta) -- last resort; invisible when the tray
+#      runs under wscript.exe (no console attached) but useful in dev.
+#
+# Callers pass ($title, $body) plus an optional $action string that current
+# fallbacks ignore (BurntToast reserved it for a future icon).
 
 function Send-Toast([string]$title, [string]$body, [string]$action = $null) {
-    $cfg = Get-Config
-    if (-not $cfg.toastsEnabled) { return }
-    try {
-        Import-Module BurntToast -ErrorAction Stop
-        $params = @{ Text = @($title, $body) }
-        if ($action) { $params['AppLogo'] = $null }  # placeholder for future icon
-        # BurntToast wraps the Windows toast API which the OS themes itself;
-        # a custom XML template with our arcade palette is possible but
-        # brittle across Windows versions. Kept as-is per Part D scope note.
-        New-BurntToastNotification @params
-    } catch {
-        # Console fallback: magenta matches the arcade palette (warnings /
-        # generic notify) so debugging output is visually consistent.
-        Write-Host "[toast] $title -- $body" -ForegroundColor Magenta
+    $cfg = $null
+    try { $cfg = Get-Config } catch { }
+    if ($cfg -and -not $cfg.toastsEnabled) { return }
+
+    # 1. Prefer BurntToast when the module is available.
+    if (Get-Module -ListAvailable -Name BurntToast) {
+        try {
+            Import-Module BurntToast -ErrorAction Stop
+            $params = @{ Text = @($title, $body) }
+            if ($action) { $params['AppLogo'] = $null }
+            New-BurntToastNotification @params
+            return
+        } catch {
+            Log-Warn "Send-Toast: BurntToast attempt failed ($($_.Exception.Message)); falling back to tray balloon."
+        }
     }
+
+    # 2. Fall back to the tray NotifyIcon balloon. Only usable AFTER
+    # Start-Tray has published $script:Tray -- Send-Toast can be called
+    # before that during install.ps1 seeding, so guard.
+    if ($script:Tray) {
+        try {
+            # ToolTipIcon lives in System.Windows.Forms which tray.ps1 has
+            # already Add-Type'd at startup; guard in case a test caller
+            # didn't load it yet.
+            $iconType = 'System.Windows.Forms.ToolTipIcon' -as [type]
+            if (-not $iconType) {
+                Add-Type -AssemblyName System.Windows.Forms | Out-Null
+                $iconType = [System.Windows.Forms.ToolTipIcon]
+            }
+            $script:Tray.ShowBalloonTip(4000, $title, $body, [System.Windows.Forms.ToolTipIcon]::Info)
+            return
+        } catch {
+            Log-Warn "Send-Toast: tray balloon attempt failed ($($_.Exception.Message)); falling back to console."
+        }
+    }
+
+    # 3. Last resort: console write. Magenta matches the arcade palette.
+    Write-Host "[toast] $title -- $body" -ForegroundColor Magenta
+    Log-Info "[toast fallback] $title -- $body"
 }
 
 # ---------- Auto-update daily check (Phase 5) ------------------------------

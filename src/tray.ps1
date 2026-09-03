@@ -1471,7 +1471,7 @@ function Invoke-SelfHealSweep {
     # runs at every tray start so users who installed a prior version get
     # their desktop cleaned up next time GRAB launches, no reinstall needed.
     try {
-        foreach ($base in @((Get-LocalDesktopPath), (Join-Path $env:USERPROFILE 'Desktop'), (Join-Path $env:USERPROFILE 'OneDrive\Desktop'))) {
+        foreach ($base in @((Get-VisibleDesktopPath), (Get-LocalDesktopPath), (Join-Path $env:USERPROFILE 'Desktop'), (Join-Path $env:USERPROFILE 'OneDrive\Desktop'))) {
             if ($base -and (Test-Path -LiteralPath $base)) {
                 $lnk = Join-Path $base 'grab Downloads.lnk'
                 if (Test-Path -LiteralPath $lnk) {
@@ -1482,11 +1482,14 @@ function Invoke-SelfHealSweep {
         }
     } catch {}
 
-    # Recreate local Desktop shortcut if missing. Uses WSH so the shortcut
-    # matches what install.ps1 writes (icon, args, workingdir). Best-effort;
-    # a missing shortcut isn't fatal, users can launch from Start Menu.
+    # Recreate the VISIBLE Desktop shortcut if missing. Phase 6.5 root cause
+    # 2: pre-6.5 self-heal used Get-LocalDesktopPath which refuses the
+    # OneDrive-redirected Desktop; under KFM that path is invisible to
+    # Explorer, so the shortcut appeared to vanish even though we wrote it
+    # correctly. Get-VisibleDesktopPath returns whatever the shell reports
+    # -- OneDrive or not -- so the user actually sees it.
     try {
-        $desktop = Get-LocalDesktopPath
+        $desktop = Get-VisibleDesktopPath
         if ($desktop -and (Test-Path -LiteralPath $desktop)) {
             $lnk = Join-Path $desktop 'grab.lnk'
             if (-not (Test-Path -LiteralPath $lnk)) {
@@ -1515,6 +1518,17 @@ function Invoke-SelfHealSweep {
             }
         }
     } catch { Log-Warn "self-heal desktop shortcut: $($_.Exception.Message)" }
+
+    # Phase 6.5 root cause 3: recreate the Start Menu shortcut if missing so
+    # Windows Search always finds "grab". Set-StartMenuShortcut is idempotent
+    # -- no-op when the shortcut already exists.
+    try {
+        $smLnk = Get-StartMenuShortcutPath
+        if (-not (Test-Path -LiteralPath $smLnk)) {
+            Set-StartMenuShortcut $true
+            Log-Info "self-heal: recreated Start Menu shortcut ($smLnk)"
+        }
+    } catch { Log-Warn "self-heal start menu shortcut: $($_.Exception.Message)" }
 
     # Download folder: recreate if missing so the next grab doesn't crash
     # trying to New-Item into a deleted parent.

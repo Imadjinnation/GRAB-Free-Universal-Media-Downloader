@@ -26,28 +26,80 @@
 . "$PSScriptRoot\core.ps1"
 
 # ---------- Locking + safe file IO ----------------------------------------
-# queue.json is read/written from multiple call sites; a mutex serializes access.
-$script:QueueMutex = New-Object System.Threading.Mutex($false, 'Global\GrabAppQueueMutex')
+# queue.json is read/written from multiple call sites; a SemaphoreSlim
+# serializes access. Phase 6.5 root cause 1: pre-6.5 this was
+# System.Threading.Mutex which is THREAD-AFFINE -- WaitOne on thread A must
+# be released on thread A or ReleaseMutex throws
+# "Object synchronization method was called from an unsynchronized block of
+# code". The tray dispatcher thread + queue Start-Job callback threads
+# routinely crossed that boundary, killing the tick timer with
+# ApplicationException. SemaphoreSlim is thread-agnostic: Wait on any
+# thread, Release on any thread. Same 1-slot semantics.
+#
+# We lose cross-process locking (Mutex could be Global\ named). That's fine
+# -- grab-app is singleton-protected already (see grab-app.ps1's
+# Global\GrabAppSingleton mutex), so only ONE grab-app touches queue.json /
+# recent.json at any time.
+#
+# SemaphoreSlim is NOT re-entrant. Set-JobStatus / Cancel-QueueJob / etc.
+# take the lock, then call Read-Queue and Write-Queue inside the block --
+# which would deadlock on a non-reentrant primitive. We layer thin
+# re-entry tracking on top: record the ManagedThreadId of the current
+# owner, and if the same thread asks to acquire again, treat it as
+# re-entrant (skip the OS-level Wait, just run the block).
+$script:QueueLock             = [System.Threading.SemaphoreSlim]::new(1, 1)
+$script:QueueLockOwnerThread  = 0
+$script:RecentLock            = [System.Threading.SemaphoreSlim]::new(1, 1)
+$script:RecentLockOwnerThread = 0
 
-# Audit P2-36: recent.json is also mutated by two paths (Append-Recent from
-# the queue tick after a job finishes; Clear-Recent from popup buttons). A
-# dedicated named mutex serializes those two so a completing job doesn't
-# race a manual "Clear all" click.
-$script:RecentMutex = New-Object System.Threading.Mutex($false, 'Global\GrabAppRecentMutex')
+function _TryAcquireQueueLock {
+    # Returns 'reentrant', 'acquired', or 'timeout'. Callers must call
+    # _ReleaseQueueLock (with matching return value) to release the lock
+    # cleanly -- reentrant acquires must NOT release the underlying
+    # SemaphoreSlim or the outer holder will lose its slot.
+    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+    if ($script:QueueLockOwnerThread -eq $tid) { return 'reentrant' }
+    $ok = $false
+    try { $ok = $script:QueueLock.Wait([TimeSpan]::FromSeconds(2)) } catch {}
+    if (-not $ok) { return 'timeout' }
+    $script:QueueLockOwnerThread = $tid
+    return 'acquired'
+}
+function _ReleaseQueueLock([string]$kind) {
+    if ($kind -ne 'acquired') { return }
+    $script:QueueLockOwnerThread = 0
+    try { [void]$script:QueueLock.Release() } catch {}
+}
+function _TryAcquireRecentLock {
+    $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+    if ($script:RecentLockOwnerThread -eq $tid) { return 'reentrant' }
+    $ok = $false
+    try { $ok = $script:RecentLock.Wait([TimeSpan]::FromSeconds(2)) } catch {}
+    if (-not $ok) { return 'timeout' }
+    $script:RecentLockOwnerThread = $tid
+    return 'acquired'
+}
+function _ReleaseRecentLock([string]$kind) {
+    if ($kind -ne 'acquired') { return }
+    $script:RecentLockOwnerThread = 0
+    try { [void]$script:RecentLock.Release() } catch {}
+}
 
 function _WithRecentMutex {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][scriptblock]$Action
     )
-    $acquired = $false
-    try { $acquired = $script:RecentMutex.WaitOne(2000) }
-    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
-    if (-not $acquired) {
-        Log-Warn "recent mutex timeout in ${Name}; skipping"
+    # SemaphoreSlim.Wait([TimeSpan]) returns bool: $true = acquired,
+    # $false = timeout. Never throws AbandonedMutexException (semaphores
+    # can't be abandoned in the OS-mutex sense -- a process exit releases
+    # the semaphore automatically).
+    $kind = _TryAcquireRecentLock
+    if ($kind -eq 'timeout') {
+        Log-Warn "recent lock timeout in ${Name}; skipping"
         return
     }
-    try { & $Action } finally { try { $script:RecentMutex.ReleaseMutex() } catch {} }
+    try { & $Action } finally { _ReleaseRecentLock $kind }
 }
 
 function Read-Queue {
@@ -59,14 +111,14 @@ function Read-Queue {
     # Pipeline callers (Read-Queue | Where {...}) work naturally.
     # Do NOT use `,$arr` here -- it breaks pipeline usage by delivering the
     # whole array as ONE pipeline object instead of enumerating it.
-    # v0.3.0: WaitOne return + AbandonedMutexException are both checked
-    # (audit P1-24: pre-v0.3.0 we proceeded without a lock on timeout).
+    # Phase 6.5 root cause 1: SemaphoreSlim replaces Mutex so Wait/Release
+    # can cross threads (Start-Job callback vs dispatcher tick timer).
+    # Re-entrant on the same thread (see _TryAcquireQueueLock docs) so
+    # nested Read-Queue inside a _WithQueueMutex block doesn't deadlock.
     $path = Get-QueuePath
-    $acquired = $false
-    try { $acquired = $script:QueueMutex.WaitOne(2000) }
-    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
-    if (-not $acquired) {
-        Log-Warn 'Read-Queue: mutex timeout after 2s; skipping read'
+    $kind = _TryAcquireQueueLock
+    if ($kind -eq 'timeout') {
+        Log-Warn 'Read-Queue: lock timeout after 2s; skipping read'
         return
     }
     try {
@@ -81,23 +133,23 @@ function Read-Queue {
         if ($null -eq $arr) { return }
         # Emit one object at a time so downstream pipelines behave.
         $arr | ForEach-Object { $_ }
-    } finally { try { $script:QueueMutex.ReleaseMutex() } catch {} }
+    } finally { _ReleaseQueueLock $kind }
 }
 
 function Write-Queue([array]$queue) {
     $path = Get-QueuePath
     Ensure-AppData
-    # WaitOne can return $false on timeout OR throw AbandonedMutexException
-    # if a prior owner exited without releasing (audit P0-3). v0.3.0: on
-    # timeout we now SKIP the write and log -- proceeding without the lock
-    # is what created the lost-update races the audit flagged (P0-7). The
-    # skipped write survives: the tick timer re-picks up whatever state
-    # existed on disk two seconds later.
-    $acquired = $false
-    try { $acquired = $script:QueueMutex.WaitOne(2000) }
-    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
-    if (-not $acquired) {
-        Log-Warn 'Write-Queue: mutex timeout after 2s; skipping write to avoid lost-update race'
+    # Phase 6.5 root cause 1: SemaphoreSlim.Wait returns $false on timeout;
+    # no AbandonedMutexException path (semaphores can't be abandoned in the
+    # OS-mutex sense). On timeout we still SKIP the write and log --
+    # proceeding without the lock is what created the lost-update races
+    # the audit flagged (P0-7). The skipped write survives: the tick timer
+    # re-picks up whatever state existed on disk two seconds later.
+    # Re-entrant on the same thread so a _WithQueueMutex-wrapped mutator
+    # (Set-JobStatus etc.) can inline call Write-Queue without deadlock.
+    $kind = _TryAcquireQueueLock
+    if ($kind -eq 'timeout') {
+        Log-Warn 'Write-Queue: lock timeout after 2s; skipping write to avoid lost-update race'
         return
     }
     try {
@@ -123,31 +175,32 @@ function Write-Queue([array]$queue) {
             [System.IO.File]::Move($tmp, $path)
         }
     } finally {
-        try { $script:QueueMutex.ReleaseMutex() } catch {}
+        _ReleaseQueueLock $kind
     }
 }
 
-# ---------- Mutex-wrapped read-modify-write helper -----------------------
+# ---------- Lock-wrapped read-modify-write helper ------------------------
 # Every mutating call site (Set-JobStatus, Cancel-QueueJob, Retry-QueueJob,
-# Recover-OrphanedJobs, Stop-AllJobs) needs to (1) take the mutex,
-# (2) read queue, (3) mutate, (4) write, (5) release. Skipping the mutex
+# Recover-OrphanedJobs, Stop-AllJobs) needs to (1) take the lock,
+# (2) read queue, (3) mutate, (4) write, (5) release. Skipping the lock
 # there produced the lost-update race the audit flagged (P0-7): a tick
 # timer read + Set-JobStatus running interleaved could clobber each other.
-# System.Threading.Mutex is re-entrant on the same thread, so calling
-# Read-Queue / Write-Queue inside a wrapped block just recurses safely.
+# SemaphoreSlim is not re-entrant at the OS level, but our
+# _TryAcquireQueueLock helper adds thread-local re-entry tracking so
+# Read-Queue / Write-Queue inside this block short-circuit and rejoin
+# the same slot instead of deadlocking.
+# Kept as _WithQueueMutex for source-compatibility with existing tests.
 function _WithQueueMutex {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][scriptblock]$Action
     )
-    $acquired = $false
-    try { $acquired = $script:QueueMutex.WaitOne(2000) }
-    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
-    if (-not $acquired) {
-        Log-Warn "queue mutex timeout in ${Name}; skipping"
+    $kind = _TryAcquireQueueLock
+    if ($kind -eq 'timeout') {
+        Log-Warn "queue lock timeout in ${Name}; skipping"
         return
     }
-    try { & $Action } finally { try { $script:QueueMutex.ReleaseMutex() } catch {} }
+    try { & $Action } finally { _ReleaseQueueLock $kind }
 }
 
 # ---------- Public API ----------------------------------------------------

@@ -2,7 +2,7 @@
 
 ## TL;DR
 
-If you install GRAB via **winget** or **scoop**, you'll see no warning. If you download `GRAB-Setup.exe` or `GRAB-Portable.zip` directly from the GitHub Release, Windows will show a one-time "Windows protected your PC" dialog. Click **More info** -> **Run anyway**. GRAB installs normally after that.
+If you install GRAB via **winget** or **scoop**, you'll see no warning. If you download `GRAB-Setup.exe` or `GRAB-Portable-v0.3.0.zip` directly from the GitHub Release, Windows will show a one-time "Windows protected your PC" dialog. Click **More info** -> **Run anyway**. GRAB installs normally after that.
 
 ## Why the warning appears
 
