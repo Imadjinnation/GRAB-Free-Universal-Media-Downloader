@@ -5,6 +5,11 @@
 #   - Running tray process
 #   - Desktop shortcuts (grab.lnk, grab Downloads.lnk)
 #   - Autostart entry (shell:startup\grab.lnk)
+#   - HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GRAB
+#   - Tray promotion registry key (HKCU NotifyIconSettings\{grab-guid})
+#   - Runtime theme scratch file (.runtime-theme.xaml) + any config.json.corrupt-* backups
+#   - Per-engine done-archive files (done-archive-yt-dlp.txt, done-archive-gallery-dl.txt)
+#   - Stale OneDrive Desktop / Startup shortcuts left by prior installs
 #
 # Asks before removing:
 #   - App-data folder (%APPDATA%\grab-app\  -- configs, queue, recent history, logs)
@@ -19,11 +24,13 @@
 #   .\uninstall.ps1            interactive (prompts before removing data / packages)
 #   .\uninstall.ps1 -Yes       remove everything without asking (state + packages)
 #   .\uninstall.ps1 -KeepState never remove app-data folder (only remove shortcuts / tray)
+#   .\uninstall.ps1 -RevertPSGallery  Set-PSRepository -Name PSGallery -InstallationPolicy Untrusted (audit finding 58)
 
 [CmdletBinding()]
 param(
     [switch]$Yes,
-    [switch]$KeepState
+    [switch]$KeepState,
+    [switch]$RevertPSGallery
 )
 
 $ErrorActionPreference = 'Continue'
@@ -55,28 +62,71 @@ if ($tray) {
 } else {
     Skip 'no running tray'
 }
-
-# --- 2. Desktop shortcuts -----------------------------------------------
-Section 'Desktop shortcuts'
-$Desktop = [Environment]::GetFolderPath('Desktop')
-foreach ($name in @('grab.lnk','grab Downloads.lnk','Grab (paste).lnk','Grab (drop).lnk','Grab Downloads.lnk')) {
-    $p = Join-Path $Desktop $name
-    if (Test-Path -LiteralPath $p) {
-        try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed $name" } catch { Warn "couldn't remove $name : $_" }
+# Also catch wscript.exe grab-app.vbs launches (finding 24).
+$vbsTray = Get-CimInstance Win32_Process -Filter "Name='wscript.exe'" -ErrorAction SilentlyContinue |
+           Where-Object { $_.CommandLine -match 'grab-app\.vbs' }
+if ($vbsTray) {
+    foreach ($t in $vbsTray) {
+        try { Stop-Process -Id $t.ProcessId -Force -ErrorAction SilentlyContinue; Ok "stopped wscript tray PID $($t.ProcessId)" } catch { Warn "couldn't stop PID $($t.ProcessId): $_" }
     }
 }
 
-# --- 3. Autostart entry -------------------------------------------------
-Section 'Autostart'
-$startup = [Environment]::GetFolderPath('Startup')
-$startLnk = Join-Path $startup 'grab.lnk'
-if (Test-Path -LiteralPath $startLnk) {
-    try { Remove-Item -LiteralPath $startLnk -Force -ErrorAction Stop; Ok 'removed shell:startup\grab.lnk' } catch { Warn "couldn't remove startup: $_" }
-} else {
-    Skip 'no autostart entry'
+# --- 2. Desktop shortcuts (LOCAL + OneDrive-redirected) -----------------
+Section 'Desktop shortcuts'
+$desktopCandidates = @(
+    [Environment]::GetFolderPath('Desktop'),
+    (Join-Path $env:USERPROFILE 'Desktop'),
+    (Join-Path $env:USERPROFILE 'OneDrive\Desktop')
+) | Where-Object { $_ } | Select-Object -Unique
+foreach ($desk in $desktopCandidates) {
+    if (-not (Test-Path -LiteralPath $desk)) { continue }
+    foreach ($name in @('grab.lnk','grab Downloads.lnk','Grab (paste).lnk','Grab (drop).lnk','Grab Downloads.lnk')) {
+        $p = Join-Path $desk $name
+        if (Test-Path -LiteralPath $p) {
+            try { Remove-Item -LiteralPath $p -Force -ErrorAction Stop; Ok "removed $desk\$name" } catch { Warn "couldn't remove ${desk}\${name}: $_" }
+        }
+    }
 }
 
-# --- 4. App-data folder -------------------------------------------------
+# --- 3. Autostart entries (shortcut + HKCU\Run + OneDrive-redirected) ---
+Section 'Autostart'
+$startupCandidates = @(
+    [Environment]::GetFolderPath('Startup'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'),
+    (Join-Path $env:USERPROFILE 'OneDrive\Microsoft\Windows\Start Menu\Programs\Startup')
+) | Where-Object { $_ } | Select-Object -Unique
+$removedAny = $false
+foreach ($su in $startupCandidates) {
+    if (-not (Test-Path -LiteralPath $su)) { continue }
+    $startLnk = Join-Path $su 'grab.lnk'
+    if (Test-Path -LiteralPath $startLnk) {
+        try { Remove-Item -LiteralPath $startLnk -Force -ErrorAction Stop; Ok "removed $startLnk"; $removedAny = $true } catch { Warn "couldn't remove ${startLnk}: $_" }
+    }
+}
+if (-not $removedAny) { Skip 'no autostart shortcut' }
+
+# HKCU\Run\GRAB (v0.3.0 primary autostart) -- ALWAYS present when autostart on.
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+try {
+    if (Get-ItemProperty -Path $runKey -Name 'GRAB' -ErrorAction SilentlyContinue) {
+        Remove-ItemProperty -Path $runKey -Name 'GRAB' -Force -ErrorAction Stop
+        Ok "removed HKCU\Run\GRAB"
+    } else {
+        Skip 'no HKCU\Run\GRAB entry'
+    }
+} catch { Warn "couldn't remove HKCU\Run\GRAB: $_" }
+
+# Tray promotion key (v0.3.0). Best-effort; matched by stable GUID.
+$grabGuid  = '{f3e2c9a1-4b8e-4d3a-9c1b-5e6a7b8c9d0e}'
+$notifyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\NotifyIconSettings\$grabGuid"
+try {
+    if (Test-Path $notifyKey) {
+        Remove-Item -Path $notifyKey -Recurse -Force -ErrorAction Stop
+        Ok "removed tray-promotion registry key ($grabGuid)"
+    }
+} catch { Warn "couldn't remove NotifyIconSettings key: $_" }
+
+# --- 4. App-data folder + assorted scratch --------------------------------
 Section 'App data'
 $appData = Join-Path $env:APPDATA 'grab-app'
 if (Test-Path -LiteralPath $appData) {
@@ -95,6 +145,24 @@ if (Test-Path -LiteralPath $appData) {
         catch { Warn "couldn't remove app-data: $_" }
     } else {
         Skip "$appData kept (settings + queue + history + logs still there)"
+        # Even when the user keeps state, prune the transient scratch files
+        # + backups that add up over time (audit v0.3.0-pass2 finding 24).
+        foreach ($scratch in @(
+            (Join-Path $appData '.runtime-theme.xaml'),
+            (Join-Path $appData 'done-archive-yt-dlp.txt'),
+            (Join-Path $appData 'done-archive-gallery-dl.txt')
+        )) {
+            if (Test-Path -LiteralPath $scratch) {
+                try { Remove-Item -LiteralPath $scratch -Force -ErrorAction Stop; Ok "removed $scratch" } catch { Warn "couldn't remove ${scratch}: $_" }
+            }
+        }
+        # config.json.corrupt-* backups
+        try {
+            $bakups = @(Get-ChildItem -LiteralPath $appData -Filter 'config.json.corrupt-*' -File -ErrorAction SilentlyContinue)
+            foreach ($b in $bakups) {
+                try { Remove-Item -LiteralPath $b.FullName -Force -ErrorAction Stop; Ok "removed backup $($b.Name)" } catch {}
+            }
+        } catch {}
     }
 } else {
     Skip 'no app-data folder'
@@ -127,7 +195,16 @@ if ($doPkg) {
     Skip 'pip packages kept'
 }
 
-# --- 6. Reminder about the source tree ----------------------------------
+# --- 6. Optional PSGallery revert (audit finding 58) -------------------
+if ($RevertPSGallery) {
+    Section 'PSGallery policy revert'
+    try {
+        Set-PSRepository -Name PSGallery -InstallationPolicy Untrusted -ErrorAction Stop
+        Ok 'PSGallery InstallationPolicy -> Untrusted (matches pre-install default)'
+    } catch { Warn "couldn't revert PSGallery: $_" }
+}
+
+# --- 7. Reminder about the source tree ----------------------------------
 Section 'Source repo'
 Skip "$PSScriptRoot -- you cloned this. Delete manually when done."
 

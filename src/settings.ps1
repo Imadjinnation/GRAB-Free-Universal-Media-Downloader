@@ -48,26 +48,28 @@ function Set-Autostart([bool]$enable) {
 
     $lnk = Get-AutostartShortcutPath
     if ($enable) {
-        $wsh = New-Object -ComObject WScript.Shell
-        $sc = $wsh.CreateShortcut($lnk)
         $repoRoot = Split-Path $PSScriptRoot -Parent
         $vbs      = Join-Path $repoRoot 'grab-app.vbs'
         $entry    = Join-Path $repoRoot 'grab-app.ps1'
-        # Prefer the wscript.exe silent launcher when present (no black
-        # console flash on Windows Terminal).
-        if (Test-Path -LiteralPath $vbs) {
-            $sc.TargetPath = 'wscript.exe'
-            $sc.Arguments  = '"' + $vbs + '"'
-        } else {
-            $sc.TargetPath = 'powershell.exe'
-            $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
-        }
-        $sc.WorkingDirectory = $repoRoot
-        # Prefer the bundled multi-res icon; fall back to a shell glyph.
         $grabIco  = Join-Path $repoRoot 'assets\icon.ico'
-        $sc.IconLocation = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { "$env:SystemRoot\System32\imageres.dll,109" }
-        $sc.Description  = 'Launch grab tray at login'
-        $sc.Save()
+        $iconLoc  = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { "$env:SystemRoot\System32\imageres.dll,109" }
+        # Prefer the wscript.exe silent launcher when present (no black
+        # console flash on Windows Terminal). Audit v0.3.0-pass2 finding
+        # 32: shortcut creation now flows through New-GrabShortcut which
+        # releases the WScript.Shell COM RCW in a finally.
+        if (Test-Path -LiteralPath $vbs) {
+            New-GrabShortcut -Path $lnk -Target 'wscript.exe' `
+                -Arguments ('"' + $vbs + '"') `
+                -WorkingDirectory $repoRoot `
+                -IconLocation $iconLoc `
+                -Description 'Launch grab tray at login'
+        } else {
+            New-GrabShortcut -Path $lnk -Target 'powershell.exe' `
+                -Arguments ('-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"') `
+                -WorkingDirectory $repoRoot `
+                -IconLocation $iconLoc `
+                -Description 'Launch grab tray at login'
+        }
     } else {
         if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
     }

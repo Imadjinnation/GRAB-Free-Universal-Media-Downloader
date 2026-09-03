@@ -2,7 +2,28 @@
 
 All notable changes to grab. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-09 - Hygiene Pass
+## [0.3.0] - 2026-09 - Hygiene Pass (Phase 4.5 second-audit corrections included)
+
+### Phase 4.5 corrections (80-finding second-pass audit)
+
+- P0: HKCU\Run\GRAB now writes `wscript.exe grab-app.vbs` (was `powershell.exe -File`) so no black console flash at login; drift-detection in `Invoke-SelfHealSweep` rewrites the entry when the user moves the repo.
+- P0: MinBtn `Content="_"` (empty in WPF) fixed to `Content="__"` in popup + settings.
+- P0: PERF-1 tick timer now gates on ANY `running` job AND on popup visibility — active downloads never throttle, and the Queue tab stays responsive while the user watches progress.
+- P1: First accessibility pass. `AutomationProperties.Name` on every named control in popup/settings; `IsDefault` on GrabBtn/SaveBtn; `IsCancel` on CancelBtn/CloseBtn; `AcceptsTab="False"` on multi-line TextBoxes; reduced-motion check in popup animations; tab strip keyboard nav.
+- P1: About window's `StampRight` is bound at Show time to `Get-GrabVersion` so it never drifts.
+- P1: Settings VersionLabel default text is generic "grab" (was hardcoded "grab v0.1.0").
+- P1: Uninstall completeness — now removes HKCU\Run\GRAB, NotifyIconSettings promotion key, `.runtime-theme.xaml`, per-engine `done-archive-*.txt`, config.json.corrupt-* backups; catches wscript.exe tray processes; optional `-RevertPSGallery`.
+- P1: install.ps1 config seed goes through `Get-Config` (single source of truth) instead of duplicating the schema; WSL + WPF gate added.
+- P1: DPI-aware multi-monitor dock (mouse-cursor-relative), `PresentationSource.FromVisual` for DIP<->device conversion in Test-PopupOnScreen, `SetProcessDpiAwareness(2)` at grab-app.ps1 top.
+- P1: `_CopyDiagnostics` redacts `sensitiveSites` array from the config dump; UTC timestamps; tooltip documents what is/is not redacted.
+- P1: `Set-PSRepository -Trusted` in install.ps1 now warns before flipping the machine-wide policy; `uninstall.ps1 -RevertPSGallery` restores Untrusted.
+- P1: Chrome v127+ cookie encryption detection — when yt-dlp reports 0 cookies with `--cookies-from-browser chrome`, a toast tells the user to switch browsers in Settings.
+- P1: yt-dlp polite rate limiting (`--sleep-requests 1 --min-sleep-interval 3 --max-sleep-interval 8`).
+- P2: `Get-Recent` reads under the recent mutex; datetime parsing now uses `[datetime]::ParseExact('o', InvariantCulture)`; log timestamps are UTC 'Z'; `Get-Queue` dead alias removed; WScript.Shell RCWs released via `New-GrabShortcut`; case-insensitive property check for config back-fill.
+- P2: `\\?\` long-path prefix helper for deep comic-chapter downloads.
+- P2: Clipboard reads in tick timer are wrapped in a bounded `Task.Wait(500)` so a browser extension can't hang the tick thread.
+- P3: Tray tooltip shows live `running:N queued:M` counts; menu items get Alt-key mnemonics (`&S`, `&Q`, `&R`, `&O`, `&A`, `&Q` etc.); popup persists Width/Height in addition to X/Y; Confirm dialog supports Alt+Y / Alt+N mnemonics; About "Open downloads" now toasts when the folder is empty instead of opening a blank Explorer window.
+- Docs: README rewrite covers autostart is opt-out, `wscript.exe grab-app.vbs` launcher, SmartScreen first-run note, network-surface table. `docs/architecture.md` rewrite: queue worker is a DispatcherTimer (not a Start-Job), thread model, .vbs launcher, runtime-theme lifecycle. `docs/file-map.md` updated with `grab-app.vbs`, `ui/theme.xaml`, `assets/fonts/`, `assets/scanlines.png`, and current test count.
 
 ### Added
 - Adaptive queue tick timer: backs off from 2s to 30s when idle, tightens to 15s on battery (PERF-1 / PERF-2).

@@ -212,8 +212,16 @@
 
           <!-- Right: min + close, flat Silkscreen glyphs -->
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <Button x:Name="MinBtn"   Style="{StaticResource IconBtn}"  Content="_"/>
-            <Button x:Name="CloseBtn" Style="{StaticResource CloseBtn}" Content="X" Margin="4,0,0,0"/>
+            <!-- Content="__" is the WPF escape for a literal underscore
+                 glyph. A single "_" was treated as an access-key marker and
+                 rendered as an empty button (audit v0.3.0-pass2 P0-3). -->
+            <Button x:Name="MinBtn"   Style="{StaticResource IconBtn}"  Content="__"
+                    AutomationProperties.Name="Minimize"
+                    ToolTip="Minimize"/>
+            <Button x:Name="CloseBtn" Style="{StaticResource CloseBtn}" Content="X" Margin="4,0,0,0"
+                    IsCancel="True"
+                    AutomationProperties.Name="Close"
+                    ToolTip="Close (Esc)"/>
           </StackPanel>
         </Grid>
 
@@ -224,10 +232,20 @@
              "active-cyan","active-green") are legacy naming kept so popup.ps1
              tab-switch dispatch doesn't need a rewrite; they all resolve to
              the same visual now. -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="14,0" VerticalAlignment="Center">
-          <Button x:Name="TabPaste"  Style="{StaticResource ArcadeTab}" Content="PASTE"  Tag="active-amber"/>
-          <Button x:Name="TabQueue"  Style="{StaticResource ArcadeTab}" Content="QUEUE"/>
-          <Button x:Name="TabRecent" Style="{StaticResource ArcadeTab}" Content="RECENT"/>
+        <!-- Audit v0.3.0-pass2 findings 5, 8: AutomationProperties.Name on
+             every named control so screen readers announce meaningful labels;
+             Left/Right arrow keys move focus between tabs (KeyboardNavigation
+             directional mode) so keyboard users can browse the strip. -->
+        <StackPanel Grid.Row="1" x:Name="TabStrip"
+                    Orientation="Horizontal" Margin="14,0" VerticalAlignment="Center"
+                    KeyboardNavigation.DirectionalNavigation="Cycle"
+                    KeyboardNavigation.TabNavigation="Once">
+          <Button x:Name="TabPaste"  Style="{StaticResource ArcadeTab}" Content="PASTE"  Tag="active-amber"
+                  AutomationProperties.Name="Paste tab"/>
+          <Button x:Name="TabQueue"  Style="{StaticResource ArcadeTab}" Content="QUEUE"
+                  AutomationProperties.Name="Queue tab"/>
+          <Button x:Name="TabRecent" Style="{StaticResource ArcadeTab}" Content="RECENT"
+                  AutomationProperties.Name="Recent tab"/>
         </StackPanel>
 
         <!-- ===== Tab content ===== -->
@@ -279,7 +297,9 @@
                          FontFamily="__GRAB_FONTS__#Inter"
                          FontSize="13"
                          Padding="14,12"
-                         VerticalContentAlignment="Center"/>
+                         VerticalContentAlignment="Center"
+                         AutomationProperties.Name="URL input"
+                         AutomationProperties.HelpText="Paste a link starting with http or https"/>
                 <!-- Amber blinking caret (PART H1). Sits inside the input row
                      as a decorative sibling to the real TextBox. Hidden while
                      the TextBox has keyboard focus (real caret takes over).
@@ -303,6 +323,9 @@
                     BorderThickness="1"
                     Margin="0,12,0,0"
                     Visibility="Collapsed">
+              <!-- Audit v0.3.0-pass2 finding 5: AcceptsTab="False" so Tab
+                   moves keyboard focus out of the box (a11y) instead of
+                   inserting a literal \t. -->
               <TextBox x:Name="MultiBox"
                        Background="Transparent"
                        BorderThickness="0"
@@ -314,9 +337,12 @@
                        FontSize="13"
                        Padding="14,10"
                        AcceptsReturn="True"
+                       AcceptsTab="False"
                        TextWrapping="Wrap"
                        Height="140"
-                       VerticalScrollBarVisibility="Auto"/>
+                       VerticalScrollBarVisibility="Auto"
+                       AutomationProperties.Name="Multiple URLs input"
+                       AutomationProperties.HelpText="One URL per line, Ctrl+Enter to submit"/>
             </Border>
 
             <TextBlock Grid.Row="2"
@@ -335,7 +361,8 @@
                         Style="{StaticResource ArcadeGhost}"
                         Content="ADD MANY"
                         BorderBrush="{StaticResource Amber}"
-                        Foreground="{StaticResource Amber}"/>
+                        Foreground="{StaticResource Amber}"
+                        AutomationProperties.Name="Toggle multi-URL input"/>
                 <!-- Content uses inline Runs so the lock emoji (U+1F512) can
                      opt into the Segoe UI Emoji / Segoe UI Symbol / Arial
                      Unicode MS fallback stack while the "PRIVATE" text keeps
@@ -344,6 +371,7 @@
                 <CheckBox x:Name="SensitiveToggle"
                           Style="{StaticResource MonoCheck}"
                           ToolTip="Route this download to a hidden .private folder"
+                          AutomationProperties.Name="Route to private folder"
                           VerticalAlignment="Center"
                           Margin="14,0,0,0">
                   <TextBlock>
@@ -351,11 +379,15 @@
                   </TextBlock>
                 </CheckBox>
               </StackPanel>
+              <!-- Audit v0.3.0-pass2 finding 5: IsDefault so Enter anywhere
+                   in the popup submits, not only from UrlBox focus. -->
               <Button x:Name="GrabBtn"
                       Style="{StaticResource ArcadePrimary}"
                       Content="GRAB IT"
                       Width="130"
-                      HorizontalAlignment="Right"/>
+                      HorizontalAlignment="Right"
+                      IsDefault="True"
+                      AutomationProperties.Name="Grab it (submit)"/>
             </Grid>
 
             <TextBlock Grid.Row="5"
@@ -385,7 +417,8 @@
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        Visibility="Collapsed"/>
             <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-              <Button x:Name="QueueClearDone" Style="{StaticResource ArcadeGhost}" Content="CLEAR FINISHED"/>
+              <Button x:Name="QueueClearDone" Style="{StaticResource ArcadeGhost}" Content="CLEAR FINISHED"
+                      AutomationProperties.Name="Clear finished jobs from queue"/>
             </StackPanel>
           </Grid>
 
@@ -415,13 +448,15 @@
                       Style="{StaticResource ArcadeGhost}"
                       Content="CLEAR &gt; 30 DAYS"
                       ToolTip="Remove entries older than 30 days from Recent (files on disk are untouched)"
+                      AutomationProperties.Name="Clear Recent entries older than 30 days"
                       Margin="0,0,8,0"/>
               <!-- Trash emoji (U+1F5D1) wrapped in an emoji-font Run so it
                    renders as a glyph, not tofu, on machines without a font
                    that carries the codepoint (audit P1-17). -->
               <Button x:Name="ClearRecentBtn"
                       Style="{StaticResource ArcadeDanger}"
-                      ToolTip="Remove every entry from Recent (files on disk are untouched)">
+                      ToolTip="Remove every entry from Recent (files on disk are untouched)"
+                      AutomationProperties.Name="Clear all Recent entries">
                 <TextBlock>
                   <Run FontFamily="Segoe UI Emoji, Segoe UI Symbol, Arial Unicode MS" Text="&#128465;"/><Run Text=" CLEAR ALL"/>
                 </TextBlock>

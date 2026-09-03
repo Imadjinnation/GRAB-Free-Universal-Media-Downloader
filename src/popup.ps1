@@ -181,7 +181,15 @@ function Build-RecentRow([object]$entry) {
     $siteShort   = Get-SiteName $entry.Url
     $urlShort    = _EscapeXaml (_TrimUrl $entry.Url 55)
     $siteShortEs = _EscapeXaml $siteShort
-    $doneAt      = if ($entry.DoneAt) { ([datetime]$entry.DoneAt).ToString('MMM d, HH:mm') } else { '' }
+    $doneAt      = if ($entry.DoneAt) {
+        try {
+            # Audit v0.3.0-pass2 finding 38/56: parse the 'o' stamp with
+            # InvariantCulture (fixed format) and display in the user's
+            # own culture so they see localised month names / hour format.
+            $dt = [datetime]::ParseExact([string]$entry.DoneAt, 'o', [Globalization.CultureInfo]::InvariantCulture)
+            $dt.ToString('MMM d, HH:mm', [Globalization.CultureInfo]::CurrentCulture)
+        } catch { [string]$entry.DoneAt }
+    } else { '' }
     $summary     = "$($entry.FilesAdded) file(s) via $($entry.ToolUsed)"
     # Mockup success/fail: lime green (#8DFF6B) for done, red (#FF4444) for failed
     $statusColor = if ($entry.Status -eq 'done') { '#8DFF6B' } else { '#FF4444' }
@@ -367,6 +375,14 @@ function Load-PopupWindow {
     $w.Add_LocationChanged({
         if ($WinLocal -and $WinLocal.WindowState -eq 'Normal') {
             Update-Config @{ popupPositionX = [int]$WinLocal.Left; popupPositionY = [int]$WinLocal.Top } | Out-Null
+        }
+    }.GetNewClosure())
+    # Audit v0.3.0-pass2 P3-77: persist popup Width/Height too. ResizeMode
+    # is CanResizeWithGrip; without saving the size, a user-resized popup
+    # snaps back to the XAML default (480x420) on next open.
+    $w.Add_SizeChanged({
+        if ($WinLocal -and $WinLocal.WindowState -eq 'Normal') {
+            Update-Config @{ popupWidth = [int]$WinLocal.Width; popupHeight = [int]$WinLocal.Height } | Out-Null
         }
     }.GetNewClosure())
 
@@ -614,12 +630,21 @@ function Load-PopupWindow {
     $recAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
     try { $recAnim.Freeze() } catch {}
 
+    # Audit v0.3.0-pass2 findings 5, 7, 34/35: honor reduced-motion, and
+    # notify the tray tick timer when the popup is visible so QUEUE tab
+    # progress stays responsive (never throttled while the user watches).
+    $wantAnim = $true
+    try { $wantAnim = [System.Windows.SystemParameters]::ClientAreaAnimation } catch {}
     $WinLocal.Add_IsVisibleChanged({
         if ($WinLocal.IsVisible) {
+            try { if (Get-Command Notify-PopupVisible -ErrorAction SilentlyContinue) { Notify-PopupVisible $true } } catch {}
             $refreshTimer.Start()
-            try { $CtlLocal.AmberCaret.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $caretAnim) } catch {}
-            try { $CtlLocal.RecDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $recAnim)     } catch {}
+            if ($wantAnim) {
+                try { $CtlLocal.AmberCaret.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $caretAnim) } catch {}
+                try { $CtlLocal.RecDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $recAnim)     } catch {}
+            }
         } else {
+            try { if (Get-Command Notify-PopupVisible -ErrorAction SilentlyContinue) { Notify-PopupVisible $false } } catch {}
             $refreshTimer.Stop()
             # Passing $null unbinds the animation so the timeline stops
             # firing; Opacity stays at whatever the last frame rendered.
@@ -683,29 +708,71 @@ function Load-PopupWindow {
     return $w
 }
 
+function _DipToDeviceMatrix([Windows.Window]$w) {
+    # Returns the CompositionTarget's TransformToDevice matrix so we can
+    # convert DIPs <-> device pixels correctly on scaled monitors. Falls
+    # back to identity when there's no PresentationSource yet (window not
+    # loaded); caller must handle that.
+    try {
+        $src = [System.Windows.PresentationSource]::FromVisual($w)
+        if ($src -and $src.CompositionTarget) {
+            return $src.CompositionTarget.TransformToDevice
+        }
+    } catch {}
+    return $null
+}
+
 function Get-DockedPosition([Windows.Window]$w) {
-    # DPI-aware dock to bottom-right of the primary screen's working area.
-    # SystemParameters.WorkArea returns a Rect in DIPs -- the same unit WPF's
-    # Window.Left / Top expect. Using Screen.WorkingArea (device pixels) with
-    # WPF DIP Width produced off-screen positions on scaled displays.
-    $wa = [System.Windows.SystemParameters]::WorkArea
-    $x = $wa.Right  - $w.Width  - 24
-    $y = $wa.Bottom - $w.Height - 24
-    # Clamp inside the work area (defensive)
-    if ($x -lt $wa.Left) { $x = $wa.Left + 24 }
-    if ($y -lt $wa.Top)  { $y = $wa.Top  + 24 }
+    # DPI-aware dock to bottom-right of the working area of whichever
+    # monitor currently contains the mouse cursor. Audit v0.3.0-pass2
+    # finding 26: pre-4.5 this always used SystemParameters.WorkArea which
+    # is the PRIMARY screen -- users with taskbar on a secondary monitor
+    # always got docked to the primary, not the display they're actively
+    # working on.
+    $curPos = [System.Windows.Forms.Cursor]::Position    # device pixels
+    $scr = [System.Windows.Forms.Screen]::FromPoint($curPos)
+    $waDev = $scr.WorkingArea                            # device pixels (System.Drawing.Rectangle)
+    # Convert device-pixel work area to DIPs. WPF Window.Left/Top are DIPs.
+    $mtx = _DipToDeviceMatrix $w
+    if ($mtx -and $mtx.M11 -gt 0 -and $mtx.M22 -gt 0) {
+        $left   = $waDev.Left   / $mtx.M11
+        $top    = $waDev.Top    / $mtx.M22
+        $right  = $waDev.Right  / $mtx.M11
+        $bottom = $waDev.Bottom / $mtx.M22
+    } else {
+        # Fallback when the window has no source yet: use SystemParameters
+        # for the current monitor as approximated by the primary.
+        $wa = [System.Windows.SystemParameters]::WorkArea
+        $left = $wa.Left; $top = $wa.Top; $right = $wa.Right; $bottom = $wa.Bottom
+    }
+    $x = $right  - $w.Width  - 24
+    $y = $bottom - $w.Height - 24
+    if ($x -lt $left) { $x = $left + 24 }
+    if ($y -lt $top)  { $y = $top  + 24 }
     return @{ X = $x; Y = $y }
 }
 
-function Test-PopupOnScreen([double]$x, [double]$y, [double]$w, [double]$h) {
-    # Returns $true if the given rect intersects any monitor's working area.
-    # Used to reject stale saved positions from a monitor that no longer exists.
+function Test-PopupOnScreen([double]$x, [double]$y, [double]$width, [double]$height, [Windows.Window]$w = $null) {
+    # Returns $true if the given rect (in DIPs) intersects any monitor's
+    # working area. Audit v0.3.0-pass2 finding 25: on scaled monitors we
+    # were comparing DIP left/top with device-pixel WorkingArea.Left/Top
+    # so a 150% scaled display made the check pass for garbage positions.
+    # Convert device-pixel WorkingArea to DIPs via PresentationSource before
+    # the intersect check.
+    $mtx = if ($w) { _DipToDeviceMatrix $w } else { $null }
     foreach ($scr in [System.Windows.Forms.Screen]::AllScreens) {
         $wa = $scr.WorkingArea
-        # WorkingArea is device pixels; convert to DIPs using the primary DPI.
-        # Good enough for a sanity check ('is this roughly on some screen?').
-        if (($x + $w) -gt $wa.Left -and $x -lt $wa.Right -and
-            ($y + $h) -gt $wa.Top  -and $y -lt $wa.Bottom) {
+        if ($mtx -and $mtx.M11 -gt 0 -and $mtx.M22 -gt 0) {
+            $l = $wa.Left   / $mtx.M11
+            $t = $wa.Top    / $mtx.M22
+            $r = $wa.Right  / $mtx.M11
+            $b = $wa.Bottom / $mtx.M22
+        } else {
+            # No matrix yet -- fall back to raw (best-effort; pre-4.5 behavior).
+            $l = $wa.Left; $t = $wa.Top; $r = $wa.Right; $b = $wa.Bottom
+        }
+        if (($x + $width) -gt $l -and $x -lt $r -and
+            ($y + $height) -gt $t  -and $y -lt $b) {
             return $true
         }
     }
@@ -725,6 +792,23 @@ function Show-Popup {
         $ctl = $w.__Controls
         $cfg = Get-Config
 
+        # Restore remembered size FIRST (audit v0.3.0-pass2 P3-77) so the
+        # position math below uses the size the user picked. Guard the values
+        # against XAML MinWidth/MinHeight caps -- silently clamp instead of
+        # trying to grow the window smaller than WPF allows.
+        $sizeProps = $cfg.PSObject.Properties.Name
+        if ($sizeProps -contains 'popupWidth' -and $cfg.popupWidth) {
+            try {
+                $wantW = [double]$cfg.popupWidth
+                if ($wantW -ge $w.MinWidth -and $wantW -le $w.MaxWidth) { $w.Width = $wantW }
+            } catch {}
+        }
+        if ($sizeProps -contains 'popupHeight' -and $cfg.popupHeight) {
+            try {
+                $wantH = [double]$cfg.popupHeight
+                if ($wantH -ge $w.MinHeight) { $w.Height = $wantH }
+            } catch {}
+        }
         # Position: use remembered position if it lands on a real screen,
         # otherwise fall back to docked bottom-right. This handles the case
         # of a monitor being disconnected between sessions.
@@ -732,7 +816,7 @@ function Show-Popup {
         if ($null -ne $cfg.popupPositionX -and $null -ne $cfg.popupPositionY) {
             $rx = [double]$cfg.popupPositionX
             $ry = [double]$cfg.popupPositionY
-            if (Test-PopupOnScreen $rx $ry $w.Width $w.Height) {
+            if (Test-PopupOnScreen $rx $ry $w.Width $w.Height $w) {
                 $w.Left = $rx
                 $w.Top  = $ry
                 $usedRemembered = $true

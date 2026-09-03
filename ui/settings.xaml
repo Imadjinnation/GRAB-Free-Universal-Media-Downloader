@@ -143,8 +143,16 @@
                        Margin="12,0,0,0" VerticalAlignment="Center"/>
           </StackPanel>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <Button x:Name="MinBtn"   Style="{StaticResource IconBtn}"  Content="_"/>
-            <Button x:Name="CloseBtn" Style="{StaticResource CloseBtn}" Content="X" Margin="4,0,0,0"/>
+            <!-- Content="__" is the WPF escape for a literal underscore
+                 glyph. A single "_" was treated as an access-key marker and
+                 rendered as an empty button (audit v0.3.0-pass2 P0-3). -->
+            <Button x:Name="MinBtn"   Style="{StaticResource IconBtn}"  Content="__"
+                    AutomationProperties.Name="Minimize"
+                    ToolTip="Minimize"/>
+            <Button x:Name="CloseBtn" Style="{StaticResource CloseBtn}" Content="X" Margin="4,0,0,0"
+                    IsCancel="True"
+                    AutomationProperties.Name="Close"
+                    ToolTip="Close (Esc)"/>
           </StackPanel>
         </Grid>
 
@@ -162,12 +170,15 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
               </Grid.ColumnDefinitions>
-              <TextBox   Grid.Column="0" x:Name="DownloadFolder" Style="{StaticResource ArcadeText}"/>
-              <Button    Grid.Column="1" x:Name="BrowseBtn" Style="{StaticResource ArcadeGhost}" Content="BROWSE" Margin="8,0,0,0"/>
+              <TextBox   Grid.Column="0" x:Name="DownloadFolder" Style="{StaticResource ArcadeText}"
+                         AutomationProperties.Name="Default download folder"/>
+              <Button    Grid.Column="1" x:Name="BrowseBtn" Style="{StaticResource ArcadeGhost}" Content="BROWSE" Margin="8,0,0,0"
+                         AutomationProperties.Name="Browse for download folder"/>
             </Grid>
 
             <CheckBox x:Name="AskBeforeEach" Style="{StaticResource ArcadeCheck}"
                       Content="Ask me where to save before each download"
+                      AutomationProperties.Name="Ask before each download"
                       Margin="0,16,0,0"/>
 
             <TextBlock Style="{StaticResource FieldLabel}" Text="Concurrent downloads" Margin="0,20,0,6"/>
@@ -175,7 +186,8 @@
               <Slider x:Name="ConcurrencySlider" Style="{StaticResource ArcadeSlider}"
                       Minimum="1" Maximum="6" TickFrequency="1" IsSnapToTickEnabled="True"
                       TickPlacement="BottomRight"
-                      Width="200" VerticalAlignment="Center"/>
+                      Width="200" VerticalAlignment="Center"
+                      AutomationProperties.Name="Concurrent downloads"/>
               <TextBlock x:Name="ConcurrencyLabel" Foreground="{StaticResource TextMuted}"
                          FontFamily="__GRAB_FONTS__#VT323" FontSize="14"
                          VerticalAlignment="Center" Margin="12,0,0,0" Text="3"/>
@@ -186,7 +198,8 @@
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
             <TextBlock Style="{StaticResource FieldLabel}"
                        Text="Browser used to read login cookies (needed for private links)"/>
-            <ComboBox x:Name="CookieBrowser" Style="{StaticResource ArcadeCombo}" Width="180" HorizontalAlignment="Left">
+            <ComboBox x:Name="CookieBrowser" Style="{StaticResource ArcadeCombo}" Width="180" HorizontalAlignment="Left"
+                      AutomationProperties.Name="Cookie browser">
               <ComboBoxItem Content="chrome"/>
               <ComboBoxItem Content="firefox"/>
               <ComboBoxItem Content="edge"/>
@@ -201,7 +214,8 @@
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
             <TextBlock Style="{StaticResource FieldLabel}"
                        Text="Preferred video quality (yt-dlp only)"/>
-            <ComboBox x:Name="VideoQuality" Style="{StaticResource ArcadeCombo}" Width="180" HorizontalAlignment="Left">
+            <ComboBox x:Name="VideoQuality" Style="{StaticResource ArcadeCombo}" Width="180" HorizontalAlignment="Left"
+                      AutomationProperties.Name="Preferred video quality">
               <ComboBoxItem Content="best"/>
               <ComboBoxItem Content="2160p"/>
               <ComboBoxItem Content="1440p"/>
@@ -217,19 +231,22 @@
             <TextBlock Style="{StaticResource SectionHeader}" Text="NOTIFICATIONS"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
             <CheckBox x:Name="ToastsEnabled" Style="{StaticResource ArcadeCheck}"
-                      Content="Show a Windows toast when a download completes or fails"/>
+                      Content="Show a Windows toast when a download completes or fails"
+                      AutomationProperties.Name="Toast notifications"/>
 
             <!-- Clipboard section -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="CLIPBOARD"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
             <CheckBox x:Name="ClipboardWatch" Style="{StaticResource ArcadeCheck}"
-                      Content="Watch the clipboard and offer to grab when I copy a URL"/>
+                      Content="Watch the clipboard and offer to grab when I copy a URL"
+                      AutomationProperties.Name="Clipboard watch"/>
 
             <!-- Display section (arcade cabinet effects) -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="DISPLAY"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
             <CheckBox x:Name="CrtScanlines" Style="{StaticResource ArcadeCheck}"
-                      Content="CRT scanlines overlay (arcade cabinet look)"/>
+                      Content="CRT scanlines overlay (arcade cabinet look)"
+                      AutomationProperties.Name="CRT scanlines overlay"/>
 
             <!-- Safety section -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="SAFETY / PRIVACY"/>
@@ -238,6 +255,7 @@
                        Text="Sensitive downloads route into a hidden .private/ folder (Windows Hidden attribute)."/>
             <CheckBox x:Name="SensitiveByDefault" Style="{StaticResource ArcadeCheck}"
                       Content="Treat EVERY download as sensitive"
+                      AutomationProperties.Name="Treat every download as sensitive"
                       Margin="0,4,0,10"/>
             <TextBlock Style="{StaticResource FieldLabel}"
                        Text="Auto-sensitive URL patterns (one per line, substring, case-insensitive)"
@@ -246,6 +264,8 @@
                     Background="{StaticResource CardHi}"
                     BorderBrush="{StaticResource Cyan}"
                     BorderThickness="1">
+              <!-- Audit v0.3.0-pass2 finding 5: AcceptsTab="False" so Tab
+                   moves focus out (a11y) instead of inserting a \t. -->
               <TextBox x:Name="SensitiveSites"
                        Background="Transparent"
                        Foreground="{StaticResource Text}"
@@ -259,6 +279,8 @@
                        Height="110"
                        TextWrapping="NoWrap"
                        AcceptsReturn="True"
+                       AcceptsTab="False"
+                       AutomationProperties.Name="Sensitive URL patterns"
                        VerticalScrollBarVisibility="Auto"/>
             </Border>
             <TextBlock Style="{StaticResource Caption}"
@@ -288,13 +310,15 @@
                          SelectionOpacity="0.35"
                          FontFamily="__GRAB_FONTS__#Inter"
                          FontSize="12"
-                         Padding="10,7"/>
+                         Padding="10,7"
+                         AutomationProperties.Name="Test URL against patterns"/>
               </Border>
               <Button Grid.Column="1" x:Name="SensitiveTestBtn"
                       Style="{StaticResource ArcadeGhost}"
                       Content="TEST"
                       Width="80"
-                      Margin="8,0,0,0"/>
+                      Margin="8,0,0,0"
+                      AutomationProperties.Name="Run sensitive-pattern test"/>
             </Grid>
             <TextBlock x:Name="SensitiveTestResult"
                        Foreground="{StaticResource TextMuted}"
@@ -306,17 +330,23 @@
             <TextBlock Style="{StaticResource SectionHeader}" Text="STARTUP"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
             <CheckBox x:Name="Autostart" Style="{StaticResource ArcadeCheck}"
-                      Content="Launch grab automatically when Windows starts"/>
+                      Content="Launch grab automatically when Windows starts"
+                      AutomationProperties.Name="Launch at Windows startup"/>
 
             <!-- About -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ABOUT"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
+            <!-- Audit v0.3.0-pass2 finding 79: default text is generic
+                 "grab" (was hardcoded "grab v0.1.0"). Real version stamp is
+                 bound in Show-Settings so the About block never drifts. -->
             <TextBlock x:Name="VersionLabel" Foreground="{StaticResource TextMuted}"
                        FontFamily="__GRAB_FONTS__#VT323" FontSize="14"
-                       Text="grab v0.1.0"/>
+                       Text="grab"/>
             <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-              <Button x:Name="OpenStateBtn" Style="{StaticResource ArcadeGhost}" Content="OPEN APP-DATA FOLDER"/>
-              <Button x:Name="OpenLogsBtn"  Style="{StaticResource ArcadeGhost}" Content="OPEN LOGS" Margin="8,0,0,0"/>
+              <Button x:Name="OpenStateBtn" Style="{StaticResource ArcadeGhost}" Content="OPEN APP-DATA FOLDER"
+                      AutomationProperties.Name="Open app-data folder"/>
+              <Button x:Name="OpenLogsBtn"  Style="{StaticResource ArcadeGhost}" Content="OPEN LOGS" Margin="8,0,0,0"
+                      AutomationProperties.Name="Open logs folder"/>
             </StackPanel>
 
             <Border Height="1" Background="{StaticResource BorderSoft}" Margin="0,26,0,0"/>
@@ -324,6 +354,7 @@
             <Button x:Name="ResetBtn" Style="{StaticResource ArcadeDanger}"
                     Content="RESET ALL TO DEFAULTS"
                     HorizontalAlignment="Left"
+                    AutomationProperties.Name="Reset all settings to defaults"
                     Margin="0,20,0,20"/>
           </StackPanel>
         </ScrollViewer>
@@ -334,8 +365,12 @@
                      FontFamily="__GRAB_FONTS__#Inter" FontSize="11"
                      VerticalAlignment="Center"/>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="CancelBtn" Style="{StaticResource ArcadeGhost}" Content="CANCEL" Width="100" Margin="0,0,8,0"/>
-            <Button x:Name="SaveBtn"   Style="{StaticResource ArcadePrimary}" Content="SAVE"   Width="130"/>
+            <Button x:Name="CancelBtn" Style="{StaticResource ArcadeGhost}" Content="CANCEL" Width="100" Margin="0,0,8,0"
+                    IsCancel="True"
+                    AutomationProperties.Name="Cancel (Esc)"/>
+            <Button x:Name="SaveBtn"   Style="{StaticResource ArcadePrimary}" Content="SAVE"   Width="130"
+                    IsDefault="True"
+                    AutomationProperties.Name="Save settings"/>
           </StackPanel>
         </Grid>
       </Grid>

@@ -54,6 +54,32 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
     return
 }
 
+# --- Per-monitor DPI awareness --------------------------------------------
+# Audit v0.3.0-pass2 finding 27: without this, WPF renders at the primary
+# monitor's DPI on all displays -- a 150% secondary shows the popup at
+# 100%, blurry-scaled by the OS. SetProcessDpiAwareness(2) = Per-Monitor V2
+# so WPF re-renders when the window crosses displays. Called BEFORE any WPF
+# type loads. Best-effort: the API exists on Windows 10 1607+; older shells
+# throw and we live with the pre-4.5 look.
+if (-not ('GrabAppDpiNative' -as [type])) {
+    try {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class GrabAppDpiNative {
+    [DllImport("shcore.dll", SetLastError=true)]
+    public static extern int SetProcessDpiAwareness(int value);
+}
+'@
+    } catch {}
+}
+try {
+    # 2 = PROCESS_PER_MONITOR_DPI_AWARE. Ignored (returns E_ACCESSDENIED)
+    # if manifest already declared a lower level.
+    [GrabAppDpiNative]::SetProcessDpiAwareness(2) | Out-Null
+} catch {
+    $script:DpiAwareFailed = $_.Exception.Message
+}
+
 # --- App User Model ID -----------------------------------------------------
 # Windows groups taskbar / tray / Alt-Tab entries by the process's explicit
 # AUMID. Without this, any GRAB window the user pins to their taskbar (or

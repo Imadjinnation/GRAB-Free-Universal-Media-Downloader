@@ -17,6 +17,19 @@
 #
 # Design principle: exit codes lie. Success is proven by real files.
 
+function _WithLongPathPrefix([string]$path) {
+    # Audit v0.3.0-pass2 finding 39: Windows APIs cap at MAX_PATH (260 chars).
+    # Deep comic-chapter downloads on nested category/series/chapter paths
+    # trip this silently. Prefix with \\?\ (extended path syntax) to lift the
+    # cap. Only applies to absolute Win32 paths; UNC paths need \\?\UNC\.
+    # Skip when path is null/empty/relative/already prefixed.
+    if ([string]::IsNullOrEmpty($path)) { return $path }
+    if ($path.StartsWith('\\?\')) { return $path }
+    if ($path.StartsWith('\\')) { return ('\\?\UNC\' + $path.Substring(2)) }
+    if ($path -match '^[A-Za-z]:\\') { return ('\\?\' + $path) }
+    return $path
+}
+
 function Get-FileCount([string]$path) {
     # -LiteralPath is REQUIRED. PowerShell treats [ ] as wildcards without it,
     # so folder names like "Series [Author]" quietly return 0. That silently
@@ -41,6 +54,11 @@ function Invoke-YtDlp([string]$url, [string]$dest, [bool]$useCookies, [string]$b
     $archive = Get-ArchivePath 'yt-dlp'
     $tool = Resolve-Tool 'yt-dlp'
     if (-not $tool) { throw 'yt-dlp not found. Run install.ps1.' }
+    # Audit v0.3.0-pass2 finding 45: polite YouTube rate limiting. yt-dlp
+    # otherwise retries a 429 immediately and can trip the throttle harder.
+    # --sleep-requests inserts a small jitter between HTTP requests, and
+    # --min-sleep-interval/max keep between-fragment pauses random so we
+    # don't hammer with predictable cadence.
     $args = @(
         '-o', (Join-Path $dest '%(uploader,channel,extractor)s\%(title).150B [%(id)s].%(ext)s'),
         '--no-mtime',
@@ -48,6 +66,9 @@ function Invoke-YtDlp([string]$url, [string]$dest, [bool]$useCookies, [string]$b
         '--embed-thumbnail',
         '--concurrent-fragments','4',
         '--retries','5',
+        '--sleep-requests','1',
+        '--min-sleep-interval','3',
+        '--max-sleep-interval','8',
         '--download-archive', $archive
     )
 
@@ -71,8 +92,25 @@ function Invoke-YtDlp([string]$url, [string]$dest, [bool]$useCookies, [string]$b
 
     if ($useCookies -and $browser -and $browser -ne 'none') { $args += @('--cookies-from-browser', $browser) }
     $args += $url
-    & $tool @args 2>&1 | ForEach-Object { $_ }
-    return $LASTEXITCODE
+    # Audit v0.3.0-pass2 finding 44: capture yt-dlp output so we can sniff
+    # "0 cookies" -- Chrome v127+ encrypts the cookie DB with an OS-bound
+    # key that yt-dlp can't read on the fly. Surface a toast so the user
+    # knows to switch to Firefox/Edge instead of staring at silent failure.
+    $capture = New-Object System.Collections.Generic.List[string]
+    & $tool @args 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        [void]$capture.Add($line)
+        $_
+    }
+    $rc = $LASTEXITCODE
+    if ($useCookies -and $browser -eq 'chrome') {
+        $needle = $capture | Where-Object { $_ -match '(?i)(extracted\s+0\s+cookies|failed to decrypt|could not decrypt)' } | Select-Object -First 1
+        if ($needle) {
+            try { Send-Toast 'Chrome cookies unavailable' 'Chrome v127+ encrypts cookies -- try Firefox/Edge in Settings > Cookies.' } catch {}
+            Log-Warn "chrome cookie extraction returned 0 rows: $needle"
+        }
+    }
+    return $rc
 }
 
 function Invoke-GalleryDl([string]$url, [string]$dest, [bool]$useCookies, [string]$browser) {

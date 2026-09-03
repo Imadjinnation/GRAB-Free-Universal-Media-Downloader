@@ -63,9 +63,7 @@ No new files created (About XAML lives inline in `tray.ps1`), so `docs/file-map.
 - [x] **CP4** — Settings panel (folder picker, concurrency, cookie browser, toasts toggle, clipboard-watch toggle, autostart toggle, reset), first-run onboarding, autostart shortcut round-trip, structured logging already-existing verified (T10-T12, T15-T18) — 2026-09-02
 - [x] **YT-DLP-NIGHTLY-FIX** — Two yt-dlp exes on PATH; winget's stale 2026.07 was winning tiebreak, capping YouTube at 360p. Resolve-Tool now prefers Python Scripts dir; install.ps1 installs `yt-dlp[default] --pre` (nightly + `yt-dlp-ejs` JS solver). Live-tested: 1080p `visionos` client works without PO Token. — 2026-09-02
 - [x] **CP5** — Uninstall script (interactive + `-Yes` + `-KeepState`), disk-space low-warning, log-token redaction, popup refresh timer only when visible, dead-code cleanup, docs sync (T14, T19) — 2026-09-02
-- [ ] **CP3** — Three tabs functional: Paste / Queue / Recent (T07-T09)
-- [ ] **CP4** — Settings + Toasts + Clipboard-watch (T10-T12)
-- [ ] **CP5** — Polish, wiring, smoke test, commit v0.1 tag (T13-T20)
+- [x] **v0.3.0 Phase 4.5** — Second-pass audit: 4 P0s (HKCU\Run uses .vbs + drift heal, MinBtn underscore, popup-visibility gating for adaptive tick), 33 P1 (a11y first pass, doc sync, uninstall completeness, HiDPI/multi-monitor, security), 33 P2 (Chrome cookies detection, rate limiting, long-path prefix, UTC timestamps, InvariantCulture datetime parsing, COM leak fix, LTSC/WSL install gate), 10 P3. Test count 342 → 402. See `docs/audit-v0.3.0-pass2.md`.
 
 ### RULE (locked in 2026-09-02): test after every checkpoint
 

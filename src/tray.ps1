@@ -13,7 +13,7 @@
 # assemblies (PresentationFramework/PresentationCore/WindowsBase) are the
 # expensive ones on cold start and are now loaded lazily via Ensure-WpfLoaded
 # (utils.ps1) when Show-AboutWindow / Confirm-ArcadeDialog first render.
-# Cuts time-to-tray-visible by ~3-5s on RTX 3050 6GB / cold PowerShell.
+# Cuts time-to-tray-visible by ~3-5s on typical dev hardware / cold PowerShell.
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
 Add-Type -AssemblyName System.Drawing        | Out-Null
 
@@ -220,18 +220,23 @@ $script:AboutXaml = @'
                        Foreground="{StaticResource TextMuted}"
                        VerticalAlignment="Center"
                        Text="FREE FOREVER &#183; MIT"/>
+            <!-- Audit v0.3.0-pass2 P3-78: StampRight text is bound at
+                 Show-AboutWindow (Get-GrabVersion) so the About footer
+                 never drifts. Default value is a neutral fallback. -->
             <TextBlock x:Name="StampRight" Grid.Column="1"
                        FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="10"
                        Foreground="#FFD447"
                        VerticalAlignment="Center"
-                       Text="v0.2.2 &#183; SEP 2026"/>
+                       Text="grab"/>
           </Grid>
         </Grid>
 
         <!-- Close button: ArcadePrimary from theme (hot-pink + black text,
              gains 2px cyan border on hover / focus). -->
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
-          <Button x:Name="OkBtn" Style="{StaticResource ArcadePrimary}" Content="CLOSE" Width="120"/>
+          <Button x:Name="OkBtn" Style="{StaticResource ArcadePrimary}" Content="CLOSE" Width="120"
+                  IsDefault="True" IsCancel="True"
+                  AutomationProperties.Name="Close About window"/>
         </StackPanel>
 
         <!-- Hidden legacy Footer element, kept so Show-AboutWindow's
@@ -360,8 +365,16 @@ $script:ConfirmDialogXaml = @'
                    LineHeight="19"
                    Margin="0,14,0,0"/>
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-          <Button x:Name="NoBtn"  Style="{StaticResource ArcadeGhost}"   Content="CANCEL" Width="100" Margin="0,0,8,0"/>
-          <Button x:Name="YesBtn" Style="{StaticResource ArcadePrimary}" Content="YES"    Width="120"/>
+          <!-- Audit v0.3.0-pass2 findings 5, 67: IsCancel + IsDefault so
+               Esc/Enter dispatch cleanly; mnemonics ("_YES", "_CANCEL")
+               enable Alt+Y / Alt+C on the underlying Content. WPF applies
+               the access-key marker to the button's Content Runs. -->
+          <Button x:Name="NoBtn"  Style="{StaticResource ArcadeGhost}"   Content="_CANCEL" Width="100" Margin="0,0,8,0"
+                  IsCancel="True"
+                  AutomationProperties.Name="Cancel"/>
+          <Button x:Name="YesBtn" Style="{StaticResource ArcadePrimary}" Content="_YES"    Width="120"
+                  IsDefault="True"
+                  AutomationProperties.Name="Confirm"/>
         </StackPanel>
       </Grid>
       </Border>
@@ -447,9 +460,14 @@ $script:ConfirmDownloadXaml = @'
                    FontSize="12"
                    Margin="0,6,0,0"/>
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
-          <Button x:Name="DlCancel" Style="{StaticResource ArcadeGhost}"  Content="CANCEL"        Width="90"  Margin="0,0,8,0"/>
-          <Button x:Name="DlChoose" Style="{StaticResource ArcadeGhost}"  Content="CHOOSE FOLDER" Width="140" Margin="0,0,8,0"/>
-          <Button x:Name="DlGrab"   Style="{StaticResource ArcadePrimary}" Content="GRAB IT"       Width="120"/>
+          <Button x:Name="DlCancel" Style="{StaticResource ArcadeGhost}"  Content="CANCEL"        Width="90"  Margin="0,0,8,0"
+                  IsCancel="True"
+                  AutomationProperties.Name="Cancel this download"/>
+          <Button x:Name="DlChoose" Style="{StaticResource ArcadeGhost}"  Content="CHOOSE FOLDER" Width="140" Margin="0,0,8,0"
+                  AutomationProperties.Name="Choose a one-time folder"/>
+          <Button x:Name="DlGrab"   Style="{StaticResource ArcadePrimary}" Content="GRAB IT"       Width="120"
+                  IsDefault="True"
+                  AutomationProperties.Name="Confirm download"/>
         </StackPanel>
       </Grid>
       </Border>
@@ -693,8 +711,19 @@ function Show-AboutWindow {
         $ok     = $w.FindName('OkBtn')
         $hdr    = $w.FindName('Header')
         $scan   = $w.FindName('ScanlinesOverlay')
+        $stamp  = $w.FindName('StampRight')
         _AddAboutBodyRuns $body
         if ($footer) { $footer.Text = $script:AboutFooter }
+        # Audit v0.3.0-pass2 P3-78: bind the version footer stamp at show
+        # time so About never drifts. Format: "v{VER} . {MON} {YY}" so it
+        # stays visually consistent with the pre-4.5 look.
+        if ($stamp) {
+            try {
+                $mon = (Get-Date).ToString('MMM', [Globalization.CultureInfo]::InvariantCulture).ToUpper()
+                $yr  = (Get-Date).ToString('yyyy', [Globalization.CultureInfo]::InvariantCulture)
+                $stamp.Text = "v$(Get-GrabVersion) $([char]0x00B7) $mon $yr"
+            } catch { $stamp.Text = "v$(Get-GrabVersion)" }
+        }
         # Honor the config.crtScanlines toggle. Audit P2-43: log the
         # swallowed error so the wrong-default symptom is diagnosable.
         try {
@@ -761,6 +790,11 @@ function _CopyDiagnostics {
     # Copies a short diagnostic bundle to the clipboard: last N log lines +
     # config.json + version + PID + repo path. Handy for support / bug reports.
     # Best-effort; never throws. Called from the tray "Copy diagnostics" item.
+    #
+    # Audit v0.3.0-pass2 finding 29: redact sensitiveSites patterns from the
+    # config dump. Those patterns are user-personal ("nhentai.net", specific
+    # domains) and leaking them into a bug report is a real privacy hit. The
+    # dump now shows the COUNT of patterns, not the patterns themselves.
     try {
         Add-Type -AssemblyName System.Windows.Forms | Out-Null
         $sb = New-Object System.Text.StringBuilder
@@ -768,15 +802,20 @@ function _CopyDiagnostics {
         [void]$sb.AppendLine("pid: $PID")
         [void]$sb.AppendLine("repo: $(Split-Path $PSScriptRoot -Parent)")
         [void]$sb.AppendLine("appdata: $(Get-AppDataPath)")
-        [void]$sb.AppendLine("time: $(Get-Date -Format o)")
-        [void]$sb.AppendLine('----- config.json -----')
+        # UTC 'o' stamp so timezones don't confuse anyone reading it.
+        [void]$sb.AppendLine("time: $((Get-Date).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture))")
+        [void]$sb.AppendLine('----- config.json (sensitiveSites redacted) -----')
         try {
-            $cfgRaw = Get-Content -LiteralPath (Get-ConfigPath) -Raw -Encoding UTF8
-            [void]$sb.AppendLine($cfgRaw)
+            $cfg = Get-Config
+            # Clone via PSObject copy so we can redact without mutating the cache.
+            $redact = $cfg | Select-Object * -ExcludeProperty sensitiveSites
+            $siteCount = @($cfg.sensitiveSites).Count
+            $redact | Add-Member -MemberType NoteProperty -Name sensitiveSites -Value "<REDACTED: $siteCount pattern(s)>" -Force
+            [void]$sb.AppendLine(($redact | ConvertTo-Json -Depth 4))
         } catch {
             [void]$sb.AppendLine("(config unreadable: $($_.Exception.Message))")
         }
-        [void]$sb.AppendLine('----- last 100 log lines -----')
+        [void]$sb.AppendLine('----- last 100 log lines (URL tokens redacted by Write-Log) -----')
         try {
             $today = Join-Path (Get-LogFolder) ("grab-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
             if (Test-Path -LiteralPath $today) {
@@ -790,31 +829,40 @@ function _CopyDiagnostics {
         }
         [System.Windows.Forms.Clipboard]::SetText($sb.ToString())
         Send-Toast 'grab diagnostics copied' 'Paste into a bug report / DM'
-        Log-Info 'diagnostics copied to clipboard'
+        Log-Info 'diagnostics copied to clipboard (sensitiveSites redacted)'
     } catch {
         Log-Err "Copy diagnostics failed: $($_.Exception.Message)"
     }
 }
 
 function _RestartTray {
-    # Kills the current tray and relaunches via powershell.exe (or the .vbs
-    # wrapper if available). The singleton mutex is released as this process
-    # exits, so the child grabs it cleanly. Called from the tray "Restart"
+    # Kills the current tray and relaunches via wscript.exe grab-app.vbs
+    # (or powershell.exe as fallback). Called from the tray "Restart"
     # menu item so users don't have to hunt for Task Manager after a stuck
     # state (audit P1-26).
+    #
+    # Audit v0.3.0-pass2 finding 64: race. Pre-4.5 we spawned the child
+    # BEFORE calling Stop-Tray, so on machines that context-switched
+    # quickly the child could hit the singleton mutex WHILE this process
+    # still owned it and silently exit ("already running"). Now the child
+    # is launched via cmd.exe with a 1-second `timeout` so the parent has
+    # time to release its mutex first (release happens in grab-app.ps1's
+    # finally after Dispatcher.Run() returns).
     try {
         $repoRoot = Split-Path $PSScriptRoot -Parent
         $vbs      = Join-Path $repoRoot 'grab-app.vbs'
         $entry    = Join-Path $repoRoot 'grab-app.ps1'
-        if (Test-Path -LiteralPath $vbs) {
-            Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
+        $inner = if (Test-Path -LiteralPath $vbs) {
+            'wscript.exe "' + $vbs + '"'
         } else {
-            Start-Process 'powershell.exe' -ArgumentList @(
-                '-STA','-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass',
-                '-File', ('"' + $entry + '"')
-            )
+            'powershell.exe -STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
         }
-        Log-Info 'tray restart requested; stopping current process'
+        # cmd /c timeout /t 1 /nobreak >nul && start "" ...
+        # `start ""` returns immediately and the child inherits cmd.exe's
+        # nothing so it detaches cleanly. Hidden window so no console flash.
+        $cmdLine = 'timeout /t 1 /nobreak >nul & start "" ' + $inner
+        Start-Process 'cmd.exe' -ArgumentList @('/c', $cmdLine) -WindowStyle Hidden
+        Log-Info 'tray restart requested; child will spawn ~1s after mutex release'
         Stop-Tray
     } catch {
         Log-Err "Restart tray failed: $($_.Exception.Message)"
@@ -839,35 +887,54 @@ function Build-TrayMenu {
         Log-Warn "tray menu palette apply failed: $($_.Exception.Message)"
     }
 
-    $mShow     = $menu.Items.Add('Show grab',      $null, { if ($script:PopupShow)    { & $script:PopupShow 'paste' } })
-    $mQueue    = $menu.Items.Add('Queue',          $null, { if ($script:PopupShow)    { & $script:PopupShow 'queue' } })
-    $mRecent   = $menu.Items.Add('Recent',         $null, { if ($script:PopupShow)    { & $script:PopupShow 'recent' } })
+    # Audit v0.3.0-pass2 P3-80: mnemonic underscores ("&S", "&Q") give
+    # Alt+key shortcuts to menu items. WinForms ToolStripMenuItem honors
+    # the & marker for underline+access-key on ContextMenuStrip.
+    # Audit v0.3.0-pass2 finding 63: Open downloads first checks the folder
+    # has any content; empty folders now surface a "no downloads yet" toast
+    # so the user knows the click did something.
+    $mShow     = $menu.Items.Add('&Show grab',      $null, { if ($script:PopupShow)    { & $script:PopupShow 'paste' } })
+    $mQueue    = $menu.Items.Add('&Queue',          $null, { if ($script:PopupShow)    { & $script:PopupShow 'queue' } })
+    $mRecent   = $menu.Items.Add('&Recent',         $null, { if ($script:PopupShow)    { & $script:PopupShow 'recent' } })
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-    $mSettings = $menu.Items.Add('Settings...',    $null, { if ($script:SettingsShow) { & $script:SettingsShow } })
-    $mOpen     = $menu.Items.Add('Open downloads', $null, {
-        $cfg = Get-Config
-        if (Test-Path -LiteralPath $cfg.downloadFolder) { Start-Process explorer.exe $cfg.downloadFolder }
+    $mSettings = $menu.Items.Add('Se&ttings...',    $null, { if ($script:SettingsShow) { & $script:SettingsShow } })
+    $mOpen     = $menu.Items.Add('&Open downloads', $null, {
+        try {
+            $cfg = Get-Config
+            $dl  = $cfg.downloadFolder
+            if (-not $dl -or -not (Test-Path -LiteralPath $dl)) {
+                Send-Toast 'grab' 'No downloads yet -- the download folder does not exist.'
+                return
+            }
+            $hasChild = @(Get-ChildItem -LiteralPath $dl -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($hasChild.Count -eq 0) {
+                Send-Toast 'grab' 'No downloads yet -- the folder is empty.'
+                return
+            }
+            Start-Process explorer.exe -ArgumentList ('"' + $dl + '"')
+        } catch { Log-Err "Open downloads failed: $($_.Exception.Message)" }
     })
-    $mLogs     = $menu.Items.Add('Show logs',      $null, {
+    $mLogs     = $menu.Items.Add('Show &logs',      $null, {
         $p = Get-LogFolder
-        if (Test-Path -LiteralPath $p) { Start-Process explorer.exe $p }
+        if (Test-Path -LiteralPath $p) { Start-Process explorer.exe -ArgumentList ('"' + $p + '"') }
     })
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-    $mDiag     = $menu.Items.Add('Copy diagnostics', $null, { _CopyDiagnostics })
-    $mRestart  = $menu.Items.Add('Restart tray',     $null, { _RestartTray })
+    $mDiag     = $menu.Items.Add('Copy &diagnostics', $null, { _CopyDiagnostics })
+    $mDiag.ToolTipText = 'Copies grab version, config.json (secret patterns redacted), and last 100 log lines (URL tokens redacted) to clipboard for bug reports.'
+    $mRestart  = $menu.Items.Add('Restart tra&y',     $null, { _RestartTray })
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     # Audit P2-42: About handler used to swallow XAML parse / dispatcher
     # errors silently -- the user clicked About, nothing happened, no clue.
     # Now: try/catch, log with stack trace, and toast so the user has a
     # nudge to check the log.
-    $mAbout    = $menu.Items.Add('About',          $null, {
+    $mAbout    = $menu.Items.Add('&About',          $null, {
         try { Show-AboutWindow }
         catch {
             Log-Err "Show-AboutWindow click failed: $($_.Exception.Message)"
             try { Send-Toast 'grab' 'Could not open About; check the log' } catch {}
         }
     })
-    $mQuit     = $menu.Items.Add('Quit',           $null, { Stop-Tray })
+    $mQuit     = $menu.Items.Add('&Quit',           $null, { Stop-Tray })
 
     # Bold "Show grab" as default
     $mShow.Font = New-Object System.Drawing.Font($mShow.Font, [System.Drawing.FontStyle]::Bold)
@@ -880,23 +947,54 @@ function Build-TrayMenu {
 # for a responsive queue). When the queue is idle for >5min we back off to
 # 30s so an unused GRAB draws almost no CPU. On battery we tighten a bit
 # more (15s) so the laptop doesn't wake the disk unnecessarily.
-$script:TickIntervalFast   = [TimeSpan]::FromSeconds(2)
+$script:TickIntervalFast    = [TimeSpan]::FromSeconds(2)
 $script:TickIntervalBattery = [TimeSpan]::FromSeconds(15)
 $script:TickIntervalIdle    = [TimeSpan]::FromSeconds(30)
 $script:LastQueueActivityAt = Get-Date
 $script:OnBattery           = $false
 $script:BatterySaverOn      = $false
+# Audit v0.3.0-pass2 finding 34/35: popup-visibility gating. Popup.ps1's
+# IsVisibleChanged handler increments/decrements this counter so tick throttling
+# NEVER kicks in while the user is watching the Queue tab or a live download.
+$script:PopupVisibleCount   = 0
 
 function Get-DesiredTickInterval {
-    # Priority: activity within 5min -> fast; else battery/saver -> battery;
-    # else idle (30s). Callers use this to pick an interval before Start().
+    # Priority (audit v0.3.0-pass2 findings 34-36):
+    #   1. ANY job currently running       -> fast (2s). Never throttle active work.
+    #   2. Popup window is visible         -> fast (2s). User is watching.
+    #   3. Activity within last 5min       -> fast (2s). Freshly hot.
+    #   4. Battery or saver mode, idle     -> battery (15s).
+    #   5. Otherwise idle                  -> idle (30s).
     $now = Get-Date
     $idleFor = $now - $script:LastQueueActivityAt
-    $qCount = 0
-    try { $qCount = @(Read-Queue).Count } catch {}
-    if ($idleFor.TotalMinutes -lt 5 -or $qCount -gt 0) { return $script:TickIntervalFast }
+    $hasRunning = $false
+    try {
+        $q = @(Read-Queue)
+        foreach ($j in $q) { if ($j.Status -eq 'running') { $hasRunning = $true; break } }
+    } catch {}
+    if ($hasRunning) { return $script:TickIntervalFast }
+    if ($script:PopupVisibleCount -gt 0) { return $script:TickIntervalFast }
+    if ($idleFor.TotalMinutes -lt 5) { return $script:TickIntervalFast }
     if ($script:BatterySaverOn -or $script:OnBattery) { return $script:TickIntervalBattery }
     return $script:TickIntervalIdle
+}
+
+function Notify-PopupVisible([bool]$isVisible) {
+    # Called from popup.ps1's IsVisibleChanged handler so the tick interval
+    # keeps running fast while the user watches progress (audit v0.3.0-pass2
+    # findings 34-36). Counter form (rather than a simple boolean) so
+    # settings + popup + about visibility all stack cleanly.
+    if ($isVisible) {
+        $script:PopupVisibleCount++
+    } else {
+        if ($script:PopupVisibleCount -gt 0) { $script:PopupVisibleCount-- }
+    }
+    # Bump the timer to fast IMMEDIATELY on show so QUEUE tab feels responsive
+    # even if the user opens it during an idle window.
+    if ($script:PopupVisibleCount -gt 0 -and $script:TickTimer -and
+        $script:TickTimer.Interval -ne $script:TickIntervalFast) {
+        $script:TickTimer.Interval = $script:TickIntervalFast
+    }
 }
 
 function Notify-QueueActivity {
@@ -947,7 +1045,16 @@ function Sync-ClipTimer {
                         try { $script:ClipTimer.Stop() } catch {}
                         return
                     }
-                    $txt = try { [System.Windows.Forms.Clipboard]::GetText() } catch { '' }
+                    # Audit v0.3.0-pass2 finding 37: wrap the clipboard read
+                    # in a bounded Task so a browser extension holding the
+                    # clipboard open can't block the tick thread.
+                    $txt = ''
+                    try {
+                        $t = [Threading.Tasks.Task]::Run([Func[string]]{
+                            try { [Windows.Forms.Clipboard]::GetText() } catch { '' }
+                        })
+                        if ($t.Wait(500)) { $txt = $t.Result }
+                    } catch { $txt = '' }
                     if ($txt -and $txt -ne $script:LastClipboardUrl -and (Test-IsUrl $txt)) {
                         $script:LastClipboardUrl = $txt
                         Send-Toast 'URL detected' "Click the tray icon to grab: $(Get-SiteName $txt)"
@@ -1008,6 +1115,22 @@ function Start-Timers {
             if ($before -ne $after -or $after -gt 0) {
                 $script:LastQueueActivityAt = Get-Date
             }
+            # Audit v0.3.0-pass2 P3-75: refresh tray tooltip with live counts
+            # so hovering the tray icon shows queue state at a glance.
+            try {
+                if ($script:Tray) {
+                    $q = @(Read-Queue)
+                    $running = @($q | Where-Object { $_.Status -eq 'running' }).Count
+                    $queued  = @($q | Where-Object { $_.Status -in @('pending','queued') }).Count
+                    $text = if ($running -eq 0 -and $queued -eq 0) {
+                        'grab -- idle'
+                    } else {
+                        "grab -- running:$running queued:$queued"
+                    }
+                    # NotifyIcon.Text max is 63 chars in .NET; ours is well under.
+                    $script:Tray.Text = $text
+                }
+            } catch {}
             $script:TickFailCount = 0
             Update-TickInterval
         } catch {
@@ -1163,10 +1286,24 @@ function Start-Tray {
         # top/side/auto-hide taskbar wouldn't recognise "bottom-right" as
         # a location. "At the corner of your screen (may be under the ^
         # arrow)" is orientation-neutral.
-        $script:Tray.ShowBalloonTip(8000, 'grab is ready',
-            "I live in the system tray at the corner of your screen (may be under the ^ arrow). Left-click me to paste a link; right-click for menu.`n`nTip: drag me out of the up-caret onto the taskbar so I'm always visible.",
-            [System.Windows.Forms.ToolTipIcon]::Info)
-        Update-Config @{ firstRunComplete = $true } | Out-Null
+        # Audit v0.3.0-pass2 P3-76: if the first-run Settings modal has
+        # already opened (grab-app.ps1 dispatches it at ApplicationIdle
+        # priority which can fire before Start-Tray finishes), delay the
+        # balloon so it doesn't overlay a modal window.
+        $modalOpen = $false
+        try {
+            if ([System.Windows.Application]::Current) {
+                foreach ($ww in [System.Windows.Application]::Current.Windows) {
+                    if ($ww.IsVisible -and $ww.Title -match '(?i)grab settings') { $modalOpen = $true; break }
+                }
+            }
+        } catch {}
+        if (-not $modalOpen) {
+            $script:Tray.ShowBalloonTip(8000, 'grab is ready',
+                "I live in the system tray at the corner of your screen (may be under the ^ arrow). Left-click me to paste a link; right-click for menu.`n`nTip: drag me out of the up-caret onto the taskbar so I'm always visible.",
+                [System.Windows.Forms.ToolTipIcon]::Info)
+            Update-Config @{ firstRunComplete = $true } | Out-Null
+        }
     }
 
     # Everything ready -- update tooltip so the user sees the transition
@@ -1206,18 +1343,30 @@ function Invoke-SelfHealSweep {
 
     # --- autostart: needs BOTH HKCU\Run AND (optionally) shortcut ------
     # HKCU\Run is now the primary mechanism (survives OneDrive quirks). If
-    # the user has autostart on, ensure the reg entry exists.
+    # the user has autostart on, ensure the reg entry exists AND still
+    # points to THIS install. Audit v0.3.0-pass2 P0-4: the reg entry
+    # captures an absolute repo path -- if the user moved the checkout,
+    # a stale entry silently fails at login. Compare against the current
+    # Get-AutostartRegistryCommand output and rewrite on drift.
     try {
         if ($cfg.autostart) {
-            $regKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+            $regKey  = if ($env:GRAB_RUN_KEY_OVERRIDE) { $env:GRAB_RUN_KEY_OVERRIDE } else { 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
             $hasReg  = $false
+            $curVal  = $null
             try {
                 $prop = Get-ItemProperty -Path $regKey -Name 'GRAB' -ErrorAction SilentlyContinue
                 $hasReg = $null -ne $prop
+                if ($hasReg) { $curVal = $prop.GRAB }
             } catch {}
             if (-not $hasReg) {
                 Set-AutostartRegistry $true
                 Log-Info 'self-heal: recreated HKCU\Run autostart entry'
+            } else {
+                $want = Get-AutostartRegistryCommand
+                if ($curVal -ne $want) {
+                    Set-AutostartRegistry $true
+                    Log-Info "self-heal: HKCU\Run drift corrected (old='$curVal' new='$want')"
+                }
             }
         }
     } catch { Log-Warn "self-heal autostart-reg: $($_.Exception.Message)" }
@@ -1274,19 +1423,21 @@ function Invoke-SelfHealSweep {
                 $vbs      = Join-Path $repoRoot 'grab-app.vbs'
                 $appEntry = Join-Path $repoRoot 'grab-app.ps1'
                 $grabIco  = Join-Path $repoRoot 'assets\icon.ico'
-                $wsh = New-Object -ComObject WScript.Shell
-                $sc = $wsh.CreateShortcut($lnk)
+                $iconLoc = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { '' }
                 if (Test-Path -LiteralPath $vbs) {
-                    $sc.TargetPath = 'wscript.exe'
-                    $sc.Arguments  = '"' + $vbs + '"'
+                    New-GrabShortcut -Path $lnk `
+                        -Target 'wscript.exe' -Arguments ('"' + $vbs + '"') `
+                        -WorkingDirectory $repoRoot `
+                        -IconLocation $iconLoc `
+                        -Description 'Launch the grab tray app'
                 } else {
-                    $sc.TargetPath = 'powershell.exe'
-                    $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"'
+                    New-GrabShortcut -Path $lnk `
+                        -Target 'powershell.exe' `
+                        -Arguments ('-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"') `
+                        -WorkingDirectory $repoRoot `
+                        -IconLocation $iconLoc `
+                        -Description 'Launch the grab tray app'
                 }
-                $sc.WorkingDirectory = $repoRoot
-                if (Test-Path -LiteralPath $grabIco) { $sc.IconLocation = $grabIco }
-                $sc.Description = 'Launch the grab tray app'
-                $sc.Save()
                 Log-Info "self-heal: recreated Desktop shortcut ($lnk)"
             }
         }

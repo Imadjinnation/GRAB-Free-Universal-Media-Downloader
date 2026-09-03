@@ -209,7 +209,9 @@ function Add-QueueJob {
     return $added
 }
 
-function Get-Queue { Read-Queue }
+# Audit v0.3.0-pass2 finding 28: Get-Queue alias was dead code (no
+# callers outside a couple of stale test comments); removed. Callers use
+# Read-Queue directly.
 
 function Set-JobStatus([string]$id, [hashtable]$updates) {
     $result = $false
@@ -332,13 +334,24 @@ function Append-Recent([object]$job) {
 
 function Get-Recent {
     # Same convention as Read-Queue: emit entries one at a time.
-    $path = Get-RecentPath
-    if (-not (Test-Path $path)) { return }
-    $raw = Get-Content $path -Raw -Encoding UTF8
-    if (-not $raw) { return }
-    $r = $raw | ConvertFrom-Json
-    if ($null -eq $r) { return }
-    $r | ForEach-Object { $_ }
+    # Audit v0.3.0-pass2 finding 65: read under the recent mutex too so a
+    # popup refresh mid-Append-Recent write can't see a torn state file.
+    # Marshal via $script:* so the closure doesn't lose enumeration.
+    $script:_GetRecentBuf = @()
+    _WithRecentMutex -Name 'Get-Recent' -Action {
+        $path = Get-RecentPath
+        if (-not (Test-Path $path)) { return }
+        $raw = Get-Content $path -Raw -Encoding UTF8
+        if (-not $raw) { return }
+        try {
+            $r = $raw | ConvertFrom-Json
+        } catch { return }
+        if ($null -eq $r) { return }
+        $script:_GetRecentBuf = if ($r -is [array]) { $r } else { @($r) }
+    }
+    $out = $script:_GetRecentBuf
+    Remove-Variable -Name _GetRecentBuf -Scope Script -ErrorAction SilentlyContinue
+    $out | ForEach-Object { $_ }
 }
 
 function Clear-Recent {
@@ -413,7 +426,11 @@ function _Clear-RecentBody {
             $ok = $false
             if ($_.DoneAt) {
                 try {
-                    $dt = [datetime]$_.DoneAt
+                    # Audit v0.3.0-pass2 finding 38: parse the 'o' ISO-8601
+                    # stamp with InvariantCulture so a machine locked to a
+                    # locale that flips date fields (e.g. de-DE) doesn't
+                    # mis-parse and lose entries.
+                    $dt = [datetime]::ParseExact([string]$_.DoneAt, 'o', [Globalization.CultureInfo]::InvariantCulture)
                     if ($dt -ge $OlderThan) { $ok = $true }
                 } catch {
                     # Unparseable stamp -- keep it (better than losing history).
@@ -549,8 +566,19 @@ function Invoke-QueueTick {
         if ($j.Status -ne 'pending') { continue }
 
         $srcRoot = $PSScriptRoot
+        # Audit v0.3.0-pass2 finding 43: forward HTTPS_PROXY / HTTP_PROXY /
+        # NO_PROXY so yt-dlp and gallery-dl see the same proxy stack the tray
+        # inherits. Start-Job creates a fresh child that DOES inherit env,
+        # but only what's set at Start-Job time; explicit re-set inside the
+        # scriptblock guarantees the child sees them.
+        $proxyHttps = $env:HTTPS_PROXY
+        $proxyHttp  = $env:HTTP_PROXY
+        $proxyNo    = $env:NO_PROXY
         $scriptBlock = {
-            param($SrcRoot, $Url, $Dest, $Tool, $Sensitive)
+            param($SrcRoot, $Url, $Dest, $Tool, $Sensitive, $ProxyHttps, $ProxyHttp, $ProxyNo)
+            if ($ProxyHttps) { $env:HTTPS_PROXY = $ProxyHttps }
+            if ($ProxyHttp)  { $env:HTTP_PROXY  = $ProxyHttp }
+            if ($ProxyNo)    { $env:NO_PROXY    = $ProxyNo }
             . "$SrcRoot\utils.ps1"
             . "$SrcRoot\core.ps1"
             $params = @{ Url = $Url }
@@ -564,7 +592,7 @@ function Invoke-QueueTick {
             @{ __grab_result = $r }
         }
         $sensitiveFlag = [bool]$j.Sensitive
-        $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $srcRoot, $j.Url, $j.Dest, $j.Tool, $sensitiveFlag
+        $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $srcRoot, $j.Url, $j.Dest, $j.Tool, $sensitiveFlag, $proxyHttps, $proxyHttp, $proxyNo
         $j.Status    = 'running'
         $j.StatusMsg = 'Downloading'
         $j.StartedAt = (Get-Date).ToString('o')

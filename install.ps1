@@ -32,6 +32,24 @@ if (-not $Quiet) {
     Write-Host "  Installing dependencies and wiring things up. Safe to re-run." -ForegroundColor DarkGray
 }
 
+# --- Environment sanity checks --------------------------------------------
+# Audit v0.3.0-pass2 findings 48/49: fail EARLY with a clear message on
+# incompatible environments so the user knows the fix ("run under real
+# Windows" / "install a Windows edition that carries WPF") instead of
+# hitting an obscure XamlReader.Parse error later.
+if ($env:WSL_DISTRO_NAME) {
+    Fail "grab is a Windows tray app; it does not run inside WSL ($($env:WSL_DISTRO_NAME))."
+    Fail "Run install.ps1 from a native Windows PowerShell (not a WSL shell)."
+    exit 1
+}
+try {
+    Add-Type -AssemblyName PresentationFramework -ErrorAction Stop | Out-Null
+} catch {
+    Fail "Windows Presentation Foundation (WPF) is unavailable on this SKU."
+    Fail "grab needs WPF. Editions without .NET Desktop (Server Core, LTSC-lite) can't run it."
+    exit 1
+}
+
 # --- Python check ---------------------------------------------------------
 Section 'Python'
 $pyExe = $null
@@ -110,6 +128,10 @@ if (-not $btInstalled) {
         # as `((-not X.Y) -eq 'Trusted')` which is always $false (a bool is
         # never the string 'Trusted'). Right shape is an explicit `-ne`.
         if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -ne 'Trusted') {
+            # Audit v0.3.0-pass2 finding 58: this changes a MACHINE-wide setting.
+            # Warn before doing it so the user is aware.
+            Warn "Setting PSGallery InstallationPolicy=Trusted (machine-wide)."
+            Warn "  Undo with:  Set-PSRepository -Name PSGallery -InstallationPolicy Untrusted"
             Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
         }
         Install-Module -Name BurntToast -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
@@ -148,36 +170,36 @@ Ok "App data at $script:AppData"
 
 $configPath = Join-Path $script:AppData 'config.json'
 # Dot-source utils.ps1 so we can use Get-GrabVersion, Get-DownloadFolderDefault,
-# and Write-JsonAtomic here. Keeps install.ps1 in lock-step with the app's
-# single source of truth for the version constant and the default paths.
+# and Get-Config here. Audit v0.3.0-pass2 finding 23: DO NOT duplicate the
+# default-config schema here. Get-Config is the single source of truth (it
+# creates + back-fills every documented key). install.ps1 just triggers it
+# by reading -- any missing key gets seeded automatically, and if the file
+# already exists we leave it alone.
 . (Join-Path $script:Root 'src\utils.ps1')
-if (-not (Test-Path $configPath)) {
-    $defaultConfig = @{
-        version           = Get-GrabVersion
-        downloadFolder    = Get-DownloadFolderDefault
-        askBeforeEach     = $false
-        clipboardWatch    = $false            # user must opt in
-        concurrency       = 3
-        autostart         = -not $NoStartup   # default ON since no hotkey
-        cookieBrowser     = 'chrome'          # 'chrome' | 'firefox' | 'edge' | 'none'
-        toastsEnabled     = $true
-        popupPositionX    = $null             # remembered after user drags
-        popupPositionY    = $null
-        firstRunComplete  = $false
-    }
-    Write-JsonAtomic -Path $configPath -Data $defaultConfig -Depth 4
-    Ok "Wrote default config: $configPath"
-} else {
-    Ok "Existing config kept: $configPath"
+$existed = Test-Path $configPath
+$cfg = Get-Config    # creates or back-fills via the app's own schema
+# install.ps1 override: -NoStartup means autostart:$false, but only when we
+# just seeded a NEW config. Never surprise an upgrading user by flipping
+# their existing preference.
+if (-not $existed -and $NoStartup) {
+    $cfg.autostart = $false
+    Set-Config $cfg
 }
+if ($existed) { Ok "Existing config kept: $configPath" } else { Ok "Wrote default config: $configPath" }
 
 # Ensure download folder exists
-$dlFolder = (Get-Content $configPath -Raw | ConvertFrom-Json).downloadFolder
-if (-not (Test-Path $dlFolder)) { New-Item -ItemType Directory -Path $dlFolder -Force | Out-Null }
+$dlFolder = $cfg.downloadFolder
+try {
+    if ($dlFolder -and -not (Test-Path -LiteralPath $dlFolder)) { New-Item -ItemType Directory -Path $dlFolder -Force | Out-Null }
+} catch { Warn "couldn't create download folder $dlFolder : $($_.Exception.Message)" }
 Ok "Download folder: $dlFolder"
 
 # --- Desktop shortcuts (rewire to new app) --------------------------------
 Section 'Desktop shortcuts'
+# NOTE: shortcut creation flows through New-GrabShortcut (utils.ps1) so the
+# WScript.Shell RCW is released (audit v0.3.0-pass2 finding 32). The
+# $WshShell variable below is kept purely for the local Make-Shortcut
+# helper's back-compat; it will be released in a finally at bottom.
 $WshShell = New-Object -ComObject WScript.Shell
 # v0.3.0: always target the LOCAL Desktop, never OneDrive-redirected. Users
 # reported the desktop icon vanishing after sync events; the fix is to not
@@ -206,13 +228,10 @@ if ($Desktop -ne $oneDriveDesktop -and (Test-Path -LiteralPath $oneDriveDesktop)
 
 function Make-Shortcut([string]$name, [string]$target, [string]$args, [string]$icon, [string]$desc, [string]$workDir) {
     $lnk = Join-Path $Desktop "$name.lnk"
-    $sc = $WshShell.CreateShortcut($lnk)
-    $sc.TargetPath = $target
-    if ($args)    { $sc.Arguments = $args }
-    if ($workDir) { $sc.WorkingDirectory = $workDir }
-    if ($icon)    { $sc.IconLocation = $icon }
-    $sc.Description = $desc
-    $sc.Save()
+    # Route through the utils.ps1 helper so the WScript.Shell RCW is
+    # released in a finally (audit v0.3.0-pass2 finding 32).
+    New-GrabShortcut -Path $lnk -Target $target -Arguments $args `
+        -WorkingDirectory $workDir -IconLocation $icon -Description $desc
     Ok "$name.lnk"
 }
 
@@ -276,18 +295,18 @@ if ($NoStartup) {
     if (Test-IsOneDrivePath $startup) {
         Warn "Startup folder is in OneDrive ($startup); using HKCU\Run only. Autostart still works."
     } else {
-        $sc = $WshShell.CreateShortcut($startupLnk)
+        # Audit v0.3.0-pass2 finding 32: New-GrabShortcut releases the COM RCW.
         if (Test-Path -LiteralPath $vbsEntry) {
-            $sc.TargetPath = 'wscript.exe'
-            $sc.Arguments  = '"' + $vbsEntry + '"'
+            New-GrabShortcut -Path $startupLnk -Target 'wscript.exe' `
+                -Arguments ('"' + $vbsEntry + '"') `
+                -WorkingDirectory $script:Root -IconLocation $grabIconLoc `
+                -Description 'Start grab tray at login'
         } else {
-            $sc.TargetPath = 'powershell.exe'
-            $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"'
+            New-GrabShortcut -Path $startupLnk -Target 'powershell.exe' `
+                -Arguments ('-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"') `
+                -WorkingDirectory $script:Root -IconLocation $grabIconLoc `
+                -Description 'Start grab tray at login'
         }
-        $sc.WorkingDirectory = $script:Root
-        $sc.IconLocation = $grabIconLoc
-        $sc.Description = 'Start grab tray at login'
-        $sc.Save()
         Ok "Startup shortcut: $startupLnk"
     }
 }
@@ -304,6 +323,12 @@ try {
     New-ItemProperty -Path $notifyKey -Name 'IsPromoted' -Value 1 -PropertyType DWORD -Force | Out-Null
     Ok 'tray promotion registry key set (IsPromoted=1)'
 } catch { Warn "tray promotion registry write failed: $($_.Exception.Message)" }
+
+# --- Release COM handles --------------------------------------------------
+# Audit v0.3.0-pass2 finding 32.
+if ($WshShell) {
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($WshShell) | Out-Null } catch {}
+}
 
 # --- Summary --------------------------------------------------------------
 Write-Host ""

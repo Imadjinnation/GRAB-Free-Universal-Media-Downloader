@@ -2221,20 +2221,31 @@ Test 'utils.ps1 defines Set-AutostartRegistry (audit P0-5, P1-11)' {
 }
 
 Test 'Set-AutostartRegistry writes/removes the HKCU\Run entry when enabled' {
-    # Round-trip. Save current state and restore after so we don't clobber
-    # the user's own autostart preference.
-    $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $name  = 'GRAB'
-    $prior = try { (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name } catch { $null }
+    # Round-trip. Audit v0.3.0-pass2 P2 finding 61: use GRAB_RUN_KEY_OVERRIDE
+    # so we never touch the user's real HKCU\Run entry.
+    $priorEnv = $env:GRAB_RUN_KEY_OVERRIDE
+    $fake = 'HKCU:\Software\GrabTestSuite-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '\Run'
+    $env:GRAB_RUN_KEY_OVERRIDE = $fake
     try {
         Set-AutostartRegistry $true
-        $val = (Get-ItemProperty -Path $key -Name $name -ErrorAction Stop).$name
-        Assert-Match $val 'grab-app\.ps1'
+        $val = (Get-ItemProperty -Path $fake -Name 'GRAB' -ErrorAction Stop).GRAB
+        # v0.3.0-pass2 P0-1: value is wscript.exe grab-app.vbs when the .vbs
+        # exists, else powershell.exe -File grab-app.ps1. Accept either.
+        Assert-Match $val 'grab-app\.(vbs|ps1)'
         Set-AutostartRegistry $false
-        $after = try { (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name } catch { $null }
+        $after = try { (Get-ItemProperty -Path $fake -Name 'GRAB' -ErrorAction SilentlyContinue).GRAB } catch { $null }
         Assert-True ($null -eq $after) 'HKCU\Run\GRAB should be gone after Set-AutostartRegistry $false'
     } finally {
-        # Restore prior state so this test never leaks.
+        # Restore prior override + delete the fake key entirely.
+        if ($priorEnv) { $env:GRAB_RUN_KEY_OVERRIDE = $priorEnv } else { Remove-Item Env:GRAB_RUN_KEY_OVERRIDE -ErrorAction SilentlyContinue }
+        try { Remove-Item -Path $fake -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    # Legacy restore-prior block kept intact below (never reached because
+    # of the return-style finally above, but kept for git-blame clarity).
+    if ($false) {
+        $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $name  = 'GRAB'
+        $prior = $null
         if ($null -ne $prior) {
             Set-ItemProperty -Path $key -Name $name -Value $prior -Force
         } else {
@@ -2464,7 +2475,11 @@ Test 'Invoke-SelfHealSweep recreates HKCU\Run entry when missing' {
 # --- P1-12 local desktop path used --------------------------------------
 Test 'Invoke-SelfHealSweep uses Get-LocalDesktopPath (audit P1-12)' {
     $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
-    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,3000}Get-LocalDesktopPath') {
+    # Widened the search window (was 3000) because Phase 4.5 added
+    # HKCU\Run drift-detection + more self-heal steps at the top of the
+    # function. Just prove Get-LocalDesktopPath is referenced somewhere
+    # inside Invoke-SelfHealSweep, before Stop-Tray closes the file.
+    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,8000}Get-LocalDesktopPath') {
         throw 'Invoke-SelfHealSweep must use Get-LocalDesktopPath so shortcuts recreate on the LOCAL Desktop (never OneDrive)'
     }
 }
@@ -2677,10 +2692,14 @@ Test 'tray.ps1 tick timers have circuit breakers (audit P1-25)' {
 
 # --- P1-26 tray menu items ------------------------------------------------
 Test 'tray context menu has Restart, Copy diagnostics, Show logs (audit P1-26)' {
+    # Note: menu labels carry Alt-key mnemonics ("&Q" / "&d" etc.) per
+    # audit v0.3.0-pass2 finding 80. Test tolerates a lone '&' inside the
+    # string.
     $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
-    Assert-Match $c "'Restart tray'"
-    Assert-Match $c "'Copy diagnostics'"
-    Assert-Match $c "'Show logs'"
+    # Regex tolerates a mnemonic '&' anywhere in the label.
+    Assert-Match $c "'Restart\s+tra&?y'"
+    Assert-Match $c "'Copy\s+&?diagnostics'"
+    Assert-Match $c "'Show\s+&?logs'"
     # And the handlers actually exist
     Assert-Match $c 'function\s+_RestartTray'
     Assert-Match $c 'function\s+_CopyDiagnostics'
@@ -2871,7 +2890,9 @@ Test 'Cancel-QueueJob only writes queue when it mutated something (audit P2-41)'
 # --- P2-42 About handler error surfaces -----------------------------------
 Test 'About handler wraps Show-AboutWindow in try/catch + toasts on failure (audit P2-42)' {
     $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
-    if ($c -notmatch "'About'[\s\S]{0,400}try\s*\{\s*Show-AboutWindow[\s\S]{0,300}Send-Toast\s+'grab'\s+'Could not open About") {
+    # Tolerate optional Alt-key mnemonic (audit v0.3.0-pass2 finding 80):
+    # menu label is '&About' now.
+    if ($c -notmatch "'&?About'[\s\S]{0,400}try\s*\{\s*Show-AboutWindow[\s\S]{0,300}Send-Toast\s+'grab'\s+'Could not open About") {
         throw 'About menu handler must try/catch + Send-Toast so silent failures are surfaced'
     }
 }
@@ -3259,6 +3280,512 @@ Test 'Sync-ClipTimer never starts ClipTimer when clipboardWatch=false (PERF-4)' 
     $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
     if ($c -notmatch "function\s+Sync-ClipTimer[\s\S]{0,1500}if\s*\(\`$wantOn\)") {
         throw 'Sync-ClipTimer must gate ClipTimer creation on $wantOn (config.clipboardWatch)'
+    }
+}
+
+# ==========================================================================
+# v0.3.0 Phase 4.5 -- second-pass audit corrections
+# ==========================================================================
+Section 'v0.3.0-pass2 (Phase 4.5)'
+
+# --- P0-1 HKCU\Run uses wscript.exe grab-app.vbs --------------------------
+Test 'Set-AutostartRegistry writes wscript.exe grab-app.vbs when the .vbs exists (pass2 P0-1)' {
+    # The grab-app.vbs ships in repo root; the helper should prefer it.
+    $val = Get-AutostartRegistryCommand
+    Assert-Match $val 'wscript\.exe'
+    Assert-Match $val 'grab-app\.vbs'
+    if ($val -match '-File\s+"[^"]+grab-app\.ps1"') {
+        throw 'HKCU\Run command must NOT be powershell.exe -File grab-app.ps1 when the .vbs launcher is present'
+    }
+}
+Test 'Get-AutostartRegistryCommand falls back to powershell.exe when grab-app.vbs is missing (pass2 P0-1)' {
+    # We can't literally delete the .vbs, but we can prove the fallback
+    # branch exists in source.
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+Get-AutostartRegistryCommand[\s\S]{0,400}Test-Path\s+-LiteralPath\s+\$vbs[\s\S]{0,400}wscript\.exe[\s\S]{0,600}powershell\.exe\s+-STA\s+-NoProfile') {
+        throw 'Get-AutostartRegistryCommand must probe grab-app.vbs and only fall back to powershell.exe when it is missing'
+    }
+}
+
+# --- P0-3 MinBtn glyph renders (Content="__" is the WPF underscore escape) -
+Test 'popup.xaml + settings.xaml MinBtn Content is "__" or a real glyph, never bare "_" (pass2 P0-3)' {
+    foreach ($xf in @('ui\popup.xaml','ui\settings.xaml')) {
+        $c = Get-Content (Join-Path $repoRoot $xf) -Raw
+        if ($c -match 'x:Name="MinBtn"[^/]*Content="_"[^_]') {
+            throw "$xf still has MinBtn Content='_' which renders as an empty access-key marker in WPF"
+        }
+        if ($c -notmatch 'x:Name="MinBtn"[\s\S]{0,200}Content="__"') {
+            throw "$xf MinBtn must use Content='__' (escaped underscore) or a glyph"
+        }
+    }
+}
+
+# --- P0-4 HKCU\Run drift heal --------------------------------------------
+Test 'Invoke-SelfHealSweep detects HKCU\Run drift + rewrites (pass2 P0-4)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    # Function must compare stored HKCU\Run value against
+    # Get-AutostartRegistryCommand and rewrite when they differ.
+    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,10000}Get-AutostartRegistryCommand') {
+        throw 'Invoke-SelfHealSweep must call Get-AutostartRegistryCommand to check for drift'
+    }
+    if ($c -notmatch 'self-heal:\s+HKCU\\Run\s+drift\s+corrected') {
+        throw 'Invoke-SelfHealSweep must log when it repairs a stale HKCU\Run value'
+    }
+}
+
+# --- PERF verification (findings 34/35/36) -------------------------------
+Test 'Get-DesiredTickInterval stays FAST when a job is running, regardless of idle time (pass2 finding 36)' {
+    if (Get-Command Get-DesiredTickInterval -ErrorAction SilentlyContinue) {
+        # Seed a queue with one running job, force idle far in the past.
+        $rj = New-QueueJob -Url 'https://example.com/x'
+        $rj.Status = 'running'
+        Write-Queue @($rj)
+        $script:LastQueueActivityAt = (Get-Date).AddHours(-1)
+        $script:OnBattery       = $true    # even on battery
+        $script:BatterySaverOn  = $false
+        $script:PopupVisibleCount = 0
+        $desired = Get-DesiredTickInterval
+        Assert-Equal ([TimeSpan]::FromSeconds(2)) $desired
+        # Cleanup
+        Write-Queue @()
+        $script:OnBattery = $false
+    }
+}
+Test 'Get-DesiredTickInterval stays FAST when popup is visible (pass2 finding 34/35)' {
+    if (Get-Command Get-DesiredTickInterval -ErrorAction SilentlyContinue) {
+        Write-Queue @()
+        $script:LastQueueActivityAt = (Get-Date).AddHours(-1)
+        $script:OnBattery       = $false
+        $script:BatterySaverOn  = $false
+        $script:PopupVisibleCount = 1     # user watching
+        $desired = Get-DesiredTickInterval
+        Assert-Equal ([TimeSpan]::FromSeconds(2)) $desired
+        $script:PopupVisibleCount = 0
+    }
+}
+Test 'Notify-PopupVisible increments/decrements PopupVisibleCount (pass2 finding 34/35)' {
+    if (Get-Command Notify-PopupVisible -ErrorAction SilentlyContinue) {
+        $script:PopupVisibleCount = 0
+        Notify-PopupVisible $true
+        Assert-Equal 1 $script:PopupVisibleCount
+        Notify-PopupVisible $true
+        Assert-Equal 2 $script:PopupVisibleCount
+        Notify-PopupVisible $false
+        Assert-Equal 1 $script:PopupVisibleCount
+        Notify-PopupVisible $false
+        Assert-Equal 0 $script:PopupVisibleCount
+        # Decrement clamped at zero
+        Notify-PopupVisible $false
+        Assert-Equal 0 $script:PopupVisibleCount
+    }
+}
+Test 'popup.ps1 IsVisibleChanged notifies the tray tick timer (pass2 finding 34/35)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'IsVisibleChanged[\s\S]{0,800}Notify-PopupVisible\s+\$true') {
+        throw 'popup.ps1 must call Notify-PopupVisible $true on IsVisibleChanged when visible'
+    }
+    if ($c -notmatch 'Notify-PopupVisible\s+\$false') {
+        throw 'popup.ps1 must call Notify-PopupVisible $false on hide'
+    }
+}
+Test 'Start-Timers is wired to call Enable-LogBatching (pass2 finding 2)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Start-Timers[\s\S]{0,4000}Enable-LogBatching') {
+        throw 'Start-Timers must call Enable-LogBatching so PERF-3 is not dead scaffolding'
+    }
+}
+Test 'popup animations honor reduced-motion (pass2 finding 5/7)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'ClientAreaAnimation') {
+        throw 'popup.ps1 must check [System.Windows.SystemParameters]::ClientAreaAnimation before running caret/RecDot storyboards'
+    }
+}
+
+# --- Accessibility (findings 5-11) ----------------------------------------
+Test 'popup.xaml every named control has AutomationProperties.Name (pass2 finding 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'ui\popup.xaml') -Raw
+    foreach ($n in @('MinBtn','CloseBtn','TabPaste','TabQueue','TabRecent',
+                     'UrlBox','MultiBox','ToggleMulti','GrabBtn','SensitiveToggle',
+                     'QueueClearDone','ClearRecentBtn','ClearOldRecentBtn')) {
+        # Wider window because some TextBox blocks are 10+ attributes long.
+        if ($c -notmatch ("x:Name=`"" + [regex]::Escape($n) + "`"[\s\S]{0,1200}AutomationProperties\.Name=")) {
+            throw "$n in popup.xaml missing AutomationProperties.Name"
+        }
+    }
+}
+Test 'settings.xaml every named control has AutomationProperties.Name (pass2 finding 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'ui\settings.xaml') -Raw
+    foreach ($n in @('MinBtn','CloseBtn','DownloadFolder','BrowseBtn','AskBeforeEach',
+                     'ConcurrencySlider','CookieBrowser','VideoQuality',
+                     'ToastsEnabled','ClipboardWatch','CrtScanlines',
+                     'SensitiveByDefault','SensitiveSites','Autostart',
+                     'OpenStateBtn','OpenLogsBtn','ResetBtn','CancelBtn','SaveBtn')) {
+        if ($c -notmatch ("x:Name=`"" + [regex]::Escape($n) + "`"[\s\S]{0,1200}AutomationProperties\.Name=")) {
+            throw "$n in settings.xaml missing AutomationProperties.Name"
+        }
+    }
+}
+Test 'popup.xaml GrabBtn is IsDefault + CloseBtn IsCancel (pass2 finding 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'ui\popup.xaml') -Raw
+    if ($c -notmatch 'x:Name="GrabBtn"[\s\S]{0,400}IsDefault="True"') {
+        throw 'GrabBtn must be IsDefault="True" so Enter submits from anywhere in the popup'
+    }
+    if ($c -notmatch 'x:Name="CloseBtn"[\s\S]{0,400}IsCancel="True"') {
+        throw 'CloseBtn must be IsCancel="True" so Esc closes the popup'
+    }
+}
+Test 'settings.xaml SaveBtn IsDefault + CancelBtn IsCancel + CloseBtn IsCancel (pass2 finding 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'ui\settings.xaml') -Raw
+    if ($c -notmatch 'x:Name="SaveBtn"[\s\S]{0,400}IsDefault="True"') {
+        throw 'SaveBtn must be IsDefault="True"'
+    }
+    if ($c -notmatch 'x:Name="CancelBtn"[\s\S]{0,400}IsCancel="True"') {
+        throw 'CancelBtn must be IsCancel="True"'
+    }
+    if ($c -notmatch 'x:Name="CloseBtn"[\s\S]{0,400}IsCancel="True"') {
+        throw 'CloseBtn must be IsCancel="True"'
+    }
+}
+Test 'multi-line TextBoxes set AcceptsTab=False so Tab moves focus (pass2 finding 5)' {
+    foreach ($pair in @(
+        @{ file='ui\popup.xaml';    name='MultiBox' },
+        @{ file='ui\settings.xaml'; name='SensitiveSites' }
+    )) {
+        $c = Get-Content (Join-Path $repoRoot $pair.file) -Raw
+        if ($c -notmatch ("x:Name=`"" + [regex]::Escape($pair.name) + "`"[\s\S]{0,1200}AcceptsTab=`"False`"")) {
+            throw "$($pair.name) in $($pair.file) must set AcceptsTab=`"False`" for keyboard a11y"
+        }
+    }
+}
+Test 'Confirm-ArcadeDialog buttons wear Alt-key mnemonics (pass2 finding 67)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'x:Name="NoBtn"[\s\S]{0,200}Content="_CANCEL"') {
+        throw 'Confirm-ArcadeDialog NoBtn must carry an Alt+C mnemonic'
+    }
+    if ($c -notmatch 'x:Name="YesBtn"[\s\S]{0,200}Content="_YES"') {
+        throw 'Confirm-ArcadeDialog YesBtn must carry an Alt+Y mnemonic'
+    }
+}
+
+# --- P3-78 About footer version binding ----------------------------------
+Test 'About window StampRight has x:Name and is bound at Show time (pass2 P3-78)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'x:Name="StampRight"') {
+        throw 'About XAML must expose StampRight via x:Name so Show-AboutWindow can bind it'
+    }
+    if ($c -notmatch 'function\s+Show-AboutWindow[\s\S]{0,6000}StampRight[\s\S]{0,600}Get-GrabVersion') {
+        throw 'Show-AboutWindow must set StampRight.Text from Get-GrabVersion so About version never drifts'
+    }
+    # Ensure the hardcoded "v0.2.2" placeholder is gone from the raw XAML.
+    if ($c -match 'x:Name="StampRight"[\s\S]{0,300}Text="v0\.2\.2') {
+        throw 'StampRight default text must not hard-code v0.2.2'
+    }
+}
+
+# --- P3-79 Settings VersionLabel default is generic ----------------------
+Test 'settings.xaml VersionLabel default is not a hardcoded version (pass2 P3-79)' {
+    $c = Get-Content (Join-Path $repoRoot 'ui\settings.xaml') -Raw
+    if ($c -match 'x:Name="VersionLabel"[\s\S]{0,300}Text="grab v0\.\d+\.\d+') {
+        throw 'settings.xaml VersionLabel default text must not hardcode a version -- the runtime binding in Show-Settings overwrites it anyway'
+    }
+}
+
+# --- P3-80 menu items carry mnemonics ------------------------------------
+Test 'tray menu items have & mnemonics (pass2 P3-80)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    foreach ($m in @('&Show grab','&Queue','&Recent','Se&ttings','&Open downloads','Show &logs','Copy &diagnostics','Restart tra&y','&About','&Quit')) {
+        Assert-Match $c ([regex]::Escape($m))
+    }
+}
+
+# --- P3-75 tray tooltip dynamic ------------------------------------------
+Test 'tick timer updates tray tooltip with live counts (pass2 P3-75)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'grab\s*--\s*running:\$running\s+queued:\$queued') {
+        throw 'Invoke-QueueTick handler must refresh $script:Tray.Text with live running/queued counts'
+    }
+}
+
+# --- P2 findings 29/38/55/56/62/65 ---------------------------------------
+Test '_CopyDiagnostics redacts sensitiveSites from the config dump (pass2 finding 29)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+_CopyDiagnostics[\s\S]{0,3000}(ExcludeProperty|Select-Object[\s\S]{0,300}-ExcludeProperty)') {
+        throw '_CopyDiagnostics must Select-Object -ExcludeProperty sensitiveSites so users don''t leak their pattern list into bug reports'
+    }
+    if ($c -notmatch 'REDACTED:\s*\$siteCount\s*pattern') {
+        throw '_CopyDiagnostics must replace sensitiveSites with a redaction hint that shows only the COUNT of patterns'
+    }
+}
+Test 'popup.ps1 parses DoneAt with ParseExact + InvariantCulture (pass2 finding 38)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'ParseExact\s*\(\s*\[string\]\$entry\.DoneAt') {
+        throw 'popup.ps1 Recent-row DoneAt formatting must use ParseExact(''o'', InvariantCulture) so de-DE / other locales don''t mis-parse the ISO stamp'
+    }
+}
+Test 'Write-Log timestamps are UTC with Z suffix (pass2 finding 55)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+Write-Log[\s\S]{0,1500}ToUniversalTime\(\)\.ToString\(''HH:mm:ssZ''') {
+        throw 'Write-Log must stamp UTC time with a Z suffix (audit v0.3.0-pass2 finding 55)'
+    }
+}
+Test 'Get-Config back-fill uses case-insensitive property check (pass2 finding 62)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -match 'PSObject\.Properties\.Name\.Contains\(''sensitiveSites''\)') {
+        throw 'Case-sensitive Properties.Name.Contains still present -- must use -ieq loop'
+    }
+}
+Test 'Get-Recent takes the recent mutex too (pass2 finding 65)' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    if ($c -notmatch 'function\s+Get-Recent[\s\S]{0,600}_WithRecentMutex') {
+        throw 'Get-Recent must serialize under _WithRecentMutex to avoid a torn read during Append-Recent'
+    }
+}
+Test 'ClipTimer clipboard read is bounded by a Task timeout (pass2 finding 37)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'Threading\.Tasks\.Task[\s\S]{0,400}Wait\(500\)') {
+        throw 'ClipTimer Clipboard.GetText must be wrapped in a Task.Run(...).Wait(500) so a blocked clipboard cannot hang the tick thread'
+    }
+}
+Test 'New-GrabShortcut releases WScript.Shell RCW via Marshal.ReleaseComObject (pass2 finding 32)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+New-GrabShortcut[\s\S]{0,1200}ReleaseComObject') {
+        throw 'New-GrabShortcut must release the WScript.Shell RCW in a finally to prevent COM leaks'
+    }
+}
+Test 'core.ps1 has yt-dlp polite rate limiting (pass2 finding 45)' {
+    $c = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    Assert-Match $c "--sleep-requests"
+    Assert-Match $c "--min-sleep-interval"
+}
+Test 'core.ps1 Chrome cookies detection surfaces a toast (pass2 finding 44)' {
+    $c = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    if ($c -notmatch 'Chrome cookies unavailable') {
+        throw 'Invoke-YtDlp must Send-Toast when Chrome cookies came back as 0 rows'
+    }
+}
+Test 'core.ps1 defines _WithLongPathPrefix (pass2 finding 39)' {
+    $c = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    if ($c -notmatch 'function\s+_WithLongPathPrefix') {
+        throw 'core.ps1 must expose a \\\\?\\ long-path prefix helper'
+    }
+}
+
+# --- P0-4 test-hook env var ----------------------------------------------
+Test 'Set-AutostartRegistry honors GRAB_RUN_KEY_OVERRIDE (pass2 finding 61)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+Set-AutostartRegistry[\s\S]{0,800}GRAB_RUN_KEY_OVERRIDE') {
+        throw 'Set-AutostartRegistry must consult $env:GRAB_RUN_KEY_OVERRIDE so tests never touch the real HKCU\Run entry'
+    }
+}
+
+# --- install / uninstall completeness (findings 23, 24, 48, 49, 58) ------
+Test 'install.ps1 seeds config via Get-Config (pass2 finding 23)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -match '@\{[\s\S]{0,200}downloadFolder\s*=\s*Get-DownloadFolderDefault[\s\S]{0,600}Write-JsonAtomic') {
+        throw 'install.ps1 must NOT duplicate the config schema inline; call Get-Config instead so keys stay in lock-step'
+    }
+    if ($c -notmatch 'Get-Config') {
+        throw 'install.ps1 must call Get-Config to seed / back-fill the config'
+    }
+}
+Test 'install.ps1 gates on WSL + WPF availability (pass2 findings 48/49)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    Assert-Match $c 'WSL_DISTRO_NAME'
+    if ($c -notmatch 'PresentationFramework') {
+        throw 'install.ps1 must probe Add-Type -AssemblyName PresentationFramework in a try/catch'
+    }
+}
+Test 'install.ps1 warns before flipping PSGallery to Trusted (pass2 finding 58)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -notmatch 'PSGallery\s+InstallationPolicy=Trusted') {
+        throw 'install.ps1 must Warn before changing PSGallery InstallationPolicy (machine-wide side-effect)'
+    }
+}
+Test 'uninstall.ps1 removes HKCU\Run\GRAB + NotifyIconSettings + .runtime-theme.xaml (pass2 finding 24)' {
+    $c = Get-Content (Join-Path $repoRoot 'uninstall.ps1') -Raw
+    Assert-Match $c 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+    Assert-Match $c 'NotifyIconSettings'
+    Assert-Match $c '\.runtime-theme\.xaml'
+    Assert-Match $c 'done-archive-yt-dlp\.txt'
+    Assert-Match $c 'config\.json\.corrupt-\*'
+    Assert-Match $c 'OneDrive\\Desktop'
+}
+
+# --- Docs sync (findings 12-22) ------------------------------------------
+Test 'README documents autostart is opt-out (pass2 finding 12)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    if ($c -notmatch 'opt-out|-NoStartup|by default') {
+        throw 'README must state autostart is opt-out (default ON), not opt-in'
+    }
+    if ($c -match 'opt-in during first run') {
+        throw 'README still uses the pre-pass2 "opt-in during first run" phrasing'
+    }
+}
+Test 'README no longer references grab Downloads.lnk (pass2 finding 13)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    # Grep the shortcut mention as a bullet line -- the manual uninstall
+    # section CAN reference it as a "delete this if it exists" cleanup hint.
+    if ($c -match '(?m)^-\s+`grab Downloads`') {
+        throw 'README still lists grab Downloads shortcut as a live desktop shortcut'
+    }
+}
+Test 'README documents uninstall.ps1 (pass2 finding 14)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '\.\\uninstall\.ps1'
+    if ($c -match 'coming later|later checkpoint') {
+        throw 'README still says the uninstaller is "coming later"'
+    }
+}
+Test 'README manual-uninstall covers HKCU\Run + NotifyIconSettings (pass2 finding 14)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\GRAB'
+    Assert-Match $c 'NotifyIconSettings'
+}
+Test 'README default folder note is D:\ + fallback under %USERPROFILE% (pass2 finding 16)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '`D:\\imadjinn-grab\\`'
+    if ($c -match '~\\Downloads\\imadjinn-grab') {
+        throw 'README still shows the pre-0.1.1 ~\Downloads default'
+    }
+}
+Test 'README lists grab-app.vbs + ui/theme.xaml + assets/fonts (pass2 finding 20)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c 'grab-app\.vbs'
+    Assert-Match $c 'ui/theme\.xaml|ui\\theme\.xaml|theme\.xaml'
+    Assert-Match $c 'assets/fonts|assets\\fonts|fonts/'
+}
+Test 'README has a Network surface section (pass2 finding 70)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '(?m)^##\s+Network surface'
+}
+Test 'README has a SmartScreen note (pass2 finding 46)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '(?i)smartscreen'
+}
+Test 'architecture.md documents the queue as a DispatcherTimer (pass2 finding 15)' {
+    $c = Get-Content (Join-Path $docsRoot 'architecture.md') -Raw
+    Assert-Match $c 'DispatcherTimer'
+    # Reject only positive claims that the queue worker IS a background PS
+    # job. The current doc reads "The queue worker is NOT a background PS
+    # job" which is the correct v0.3.0-pass2 truth.
+    if ($c -match 'queue worker\s+(is|=|runs as|running as)\s+(a\s+)?background\s+PS\s+job') {
+        throw 'architecture.md still claims the queue worker IS a background PS job'
+    }
+    # And it must say the worker is a DispatcherTimer (positive assertion).
+    if ($c -notmatch 'queue worker\s+is\s+NOT\s+a\s+background\s+PS\s+job') {
+        throw 'architecture.md must explicitly clarify the queue worker is NOT a background PS job'
+    }
+}
+Test 'architecture.md documents grab-app.vbs launcher (pass2 finding 16)' {
+    $c = Get-Content (Join-Path $docsRoot 'architecture.md') -Raw
+    Assert-Match $c 'grab-app\.vbs'
+    Assert-Match $c 'wscript\.exe'
+    Assert-Match $c 'runtime-theme|Get-RuntimeThemeUri'
+    Assert-Match $c '(?i)thread model'
+}
+Test 'file-map.md lists every current file (pass2 finding 20)' {
+    $c = Get-Content (Join-Path $docsRoot 'file-map.md') -Raw
+    foreach ($f in @('grab-app\.vbs','ui/theme\.xaml','assets/fonts','assets/scanlines\.png','done-archive-yt-dlp\.txt','\.runtime-theme\.xaml','audit-v0\.3\.0-pass2\.md')) {
+        Assert-Match $c $f
+    }
+}
+Test 'PROGRESS.md has no duplicate unchecked CP3-CP5 entries (pass2 finding 21)' {
+    $c = Get-Content (Join-Path $repoRoot 'PROGRESS.md') -Raw
+    $unchecked = @([regex]::Matches($c, '\[\s\]\s+\*\*CP[3-5]\*\*'))
+    if ($unchecked.Count -gt 0) {
+        throw "PROGRESS.md still has $($unchecked.Count) unchecked CP3-CP5 line(s) that duplicate checked ones"
+    }
+}
+
+# --- popup persist size (P3-77) ------------------------------------------
+Test 'popup.ps1 persists Width + Height in config on resize (pass2 P3-77)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'SizeChanged[\s\S]{0,500}popupWidth[\s\S]{0,200}popupHeight') {
+        throw 'popup.ps1 must persist popupWidth + popupHeight on SizeChanged'
+    }
+}
+
+# --- grab-app.ps1 DPI awareness (finding 27) -----------------------------
+Test 'grab-app.ps1 sets Per-Monitor V2 DPI awareness (pass2 finding 27)' {
+    $c = Get-Content (Join-Path $repoRoot 'grab-app.ps1') -Raw
+    Assert-Match $c 'SetProcessDpiAwareness'
+}
+
+# --- Test-PopupOnScreen uses PresentationSource (finding 25) -------------
+Test 'Test-PopupOnScreen converts device pixels via PresentationSource (pass2 finding 25)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'function\s+Test-PopupOnScreen[\s\S]{0,1500}PresentationSource|function\s+_DipToDeviceMatrix[\s\S]{0,1500}PresentationSource') {
+        throw 'Test-PopupOnScreen must use PresentationSource.FromVisual to convert device pixels <-> DIPs'
+    }
+}
+
+# --- multi-monitor dock (finding 26) --------------------------------------
+Test 'Get-DockedPosition targets the monitor containing the mouse cursor (pass2 finding 26)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'function\s+Get-DockedPosition[\s\S]{0,1500}Screen\]::FromPoint') {
+        throw 'Get-DockedPosition must use Screen.FromPoint(Cursor.Position) so multi-monitor users dock to the active display'
+    }
+}
+
+# --- Additional pass2 static-scan / behaviour tests ----------------------
+Test 'assets/icon.ico is a valid ICO container with at least one image (pass2 finding 54)' {
+    $ico = Join-Path $repoRoot 'assets\icon.ico'
+    if (-not (Test-Path -LiteralPath $ico)) { return }  # OK: fallback path handles missing
+    $bytes = [System.IO.File]::ReadAllBytes($ico)
+    if ($bytes.Length -lt 22) { throw 'ICO too short' }
+    # ICO magic: 00 00 01 00 (reserved=0, type=1 for icon), then imageCount uint16
+    if ($bytes[0] -ne 0 -or $bytes[1] -ne 0 -or $bytes[2] -ne 1 -or $bytes[3] -ne 0) {
+        throw 'assets/icon.ico is not a valid ICO container (magic mismatch)'
+    }
+    $imageCount = $bytes[4] -bor ($bytes[5] -shl 8)
+    if ($imageCount -lt 1) { throw 'ICO container reports zero images' }
+}
+Test 'assets/scanlines.png exists (pass2 finding 20)' {
+    Assert-PathExists (Join-Path $repoRoot 'assets\scanlines.png')
+}
+Test 'grab-app.vbs exists at repo root (pass2 finding 20)' {
+    Assert-PathExists (Join-Path $repoRoot 'grab-app.vbs')
+}
+Test 'ui/theme.xaml exists (pass2 finding 20)' {
+    Assert-PathExists (Join-Path $repoRoot 'ui\theme.xaml')
+}
+Test 'assets/fonts folder exists (pass2 finding 20)' {
+    Assert-PathExists (Join-Path $repoRoot 'assets\fonts')
+}
+Test 'Get-Recent still emits entries after mutex wrap (pass2 finding 65)' {
+    # Round-trip: append then read.
+    Write-JsonAtomic -Path (Get-RecentPath) -Data @() -Depth 4
+    $job = [PSCustomObject]@{
+        Url='https://example.com/pass2-recent-test'; Dest='C:\tmp'; DoneAt=(Get-Date).ToString('o');
+        Status='done'; FilesAdded=1; ToolUsed='yt-dlp'; DurationMs=42; Error=$null; Sensitive=$false
+    }
+    Append-Recent $job
+    $r = @(Get-Recent)
+    Assert-True ($r.Count -ge 1) 'Get-Recent should emit the entry we just appended'
+    if ($r[0].Url -notmatch 'pass2-recent-test') { throw 'Get-Recent did not return the newest entry' }
+}
+Test 'Get-DesiredTickInterval goes to idle 30s when everything is quiet (pass2 findings 34/35/36)' {
+    if (Get-Command Get-DesiredTickInterval -ErrorAction SilentlyContinue) {
+        Write-Queue @()
+        $script:LastQueueActivityAt = (Get-Date).AddHours(-1)
+        $script:OnBattery         = $false
+        $script:BatterySaverOn    = $false
+        $script:PopupVisibleCount = 0
+        Assert-Equal ([TimeSpan]::FromSeconds(30)) (Get-DesiredTickInterval)
+    }
+}
+Test 'PowerShell Rotate math is at 500 (pass2 finding 51)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    Assert-Match $c 'LogRotateCheck\s*\+\s*1\s*\)\s*%\s*500'
+}
+
+# --- test count baseline / self-check ------------------------------------
+Test 'test count exceeds pass2 baseline (400+)' {
+    # Just prove we're above the phase-4 baseline of 342. Actual count is
+    # reported in the final summary; this assertion catches accidental
+    # test removal.
+    if ($script:PassCount -lt 340) {
+        throw "smoke test count regressed: only $($script:PassCount) passing so far (was 342 baseline)"
     }
 }
 

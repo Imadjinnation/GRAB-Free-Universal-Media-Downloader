@@ -194,12 +194,63 @@ function Get-LocalStartupPath {
 # case for many modern Windows installs), the shortcut can silently vanish
 # during sync -- especially if the user pauses/unlinks the drive. HKCU\Run
 # is local to the machine and survives cloud shenanigans.
+#
+# Audit v0.3.0-pass2 P0-1: pre-4.5 this hard-coded `powershell.exe -File
+# grab-app.ps1`, so every login flashed a black console window before the
+# tray icon appeared. Now we mirror _RestartTray's pattern -- if the
+# wscript.exe launcher (grab-app.vbs) exists in the repo root, use IT so
+# the launch is fully silent; fall back to powershell.exe only when the
+# .vbs is missing (older checkouts).
+# Audit v0.3.0-pass2 finding 32: WScript.Shell RCWs were never released
+# so every autostart write / self-heal sweep leaked a COM handle. This
+# helper wraps the create-and-release dance so every callsite gets it
+# right without duplicating the pattern.
+function New-GrabShortcut {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Target,
+        [string]$Arguments = '',
+        [string]$WorkingDirectory = '',
+        [string]$IconLocation = '',
+        [string]$Description = ''
+    )
+    $wsh = $null
+    try {
+        $wsh = New-Object -ComObject WScript.Shell
+        $sc = $wsh.CreateShortcut($Path)
+        $sc.TargetPath = $Target
+        if ($Arguments)        { $sc.Arguments = $Arguments }
+        if ($WorkingDirectory) { $sc.WorkingDirectory = $WorkingDirectory }
+        if ($IconLocation)     { $sc.IconLocation = $IconLocation }
+        if ($Description)      { $sc.Description = $Description }
+        $sc.Save()
+    } finally {
+        if ($wsh) {
+            try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null } catch {}
+        }
+    }
+}
+
+function Get-AutostartRegistryCommand {
+    # Returns the exact command string we want written to HKCU\Run\GRAB, so
+    # both Set-AutostartRegistry and drift-detection in Invoke-SelfHealSweep
+    # can compare against a single source of truth.
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $vbs      = Join-Path $repoRoot 'grab-app.vbs'
+    $entry    = Join-Path $repoRoot 'grab-app.ps1'
+    if (Test-Path -LiteralPath $vbs) {
+        return 'wscript.exe "' + $vbs + '"'
+    }
+    return 'powershell.exe -STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
+}
+
 function Set-AutostartRegistry([bool]$enable) {
-    $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    # Test hook (audit P2 #61): tests set GRAB_RUN_KEY_OVERRIDE to a fake
+    # subkey path so a Set-Autostart round-trip never touches the real
+    # HKCU\Run entry.
+    $key   = if ($env:GRAB_RUN_KEY_OVERRIDE) { $env:GRAB_RUN_KEY_OVERRIDE } else { 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
     $name  = 'GRAB'
-    # $PSScriptRoot inside utils.ps1 is <repo>\src, so parent is the repo root.
-    $entry = Join-Path (Split-Path $PSScriptRoot -Parent) 'grab-app.ps1'
-    $value = 'powershell.exe -STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
+    $value = Get-AutostartRegistryCommand
     try {
         if ($enable) {
             if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
@@ -281,19 +332,25 @@ function Get-Config {
         return Get-Config
     }
     # Back-fill new keys added post-first-config, so older configs still work
-    if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveSites')) {
+    # Audit v0.3.0-pass2 finding 62: PSObject.Properties.Name.Contains is
+    # case-sensitive (System.Collections.ObjectModel.Collection.Contains).
+    # A config with 'SensitiveSites' (mis-cased on hand-edit) would
+    # silently double-add the key, then the mis-cased read below fails.
+    # Use a case-insensitive helper.
+    $hasProp = { param($o,$n) foreach ($p in $o.PSObject.Properties.Name) { if ($p -ieq $n) { return $true } } return $false }
+    if (-not (& $hasProp $cfg 'sensitiveSites')) {
         $cfg | Add-Member -MemberType NoteProperty -Name sensitiveSites -Value @() -Force
     }
-    if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveByDefault')) {
+    if (-not (& $hasProp $cfg 'sensitiveByDefault')) {
         $cfg | Add-Member -MemberType NoteProperty -Name sensitiveByDefault -Value $false -Force
     }
-    if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveFolderName')) {
+    if (-not (& $hasProp $cfg 'sensitiveFolderName')) {
         $cfg | Add-Member -MemberType NoteProperty -Name sensitiveFolderName -Value '.private' -Force
     }
-    if (-not $cfg.PSObject.Properties.Name.Contains('videoQuality')) {
+    if (-not (& $hasProp $cfg 'videoQuality')) {
         $cfg | Add-Member -MemberType NoteProperty -Name videoQuality -Value 'best' -Force
     }
-    if (-not $cfg.PSObject.Properties.Name.Contains('crtScanlines')) {
+    if (-not (& $hasProp $cfg 'crtScanlines')) {
         # Back-fill: default TRUE so existing configs keep the arcade cabinet
         # look after upgrading. Users can uncheck it in Settings > Display.
         $cfg | Add-Member -MemberType NoteProperty -Name crtScanlines -Value $true -Force
@@ -519,10 +576,16 @@ function Write-Log([string]$level, [string]$msg) {
     # 50 writes; prune every 200. Both are best-effort and never block the
     # actual log append below. At worst, a rotation is delayed by <50 lines
     # which is trivial compared to the 5MB threshold.
-    $script:LogRotateCheck = ($script:LogRotateCheck + 1) % 200
-    if (($script:LogRotateCheck % 50) -eq 0) { _RotateLogIfNeeded $file }
+    # Audit v0.3.0-pass2 P2 finding 51: rotate check batched to every 500
+    # writes (was 50). Prune stays at every 200 writes because a full log
+    # folder listing is cheap; rotate does a stat() so batching it further
+    # is a small hot-path win under bursty logging.
+    $script:LogRotateCheck = ($script:LogRotateCheck + 1) % 500
+    if (($script:LogRotateCheck % 500) -eq 0) { _RotateLogIfNeeded $file }
     if ($script:LogRotateCheck -eq 0)         { _PruneOldLogs }
-    $stamp = Get-Date -Format 'HH:mm:ss'
+    # Audit v0.3.0-pass2 finding 55: UTC 'Z' suffix so log timestamps are
+    # unambiguous across timezones and DST rollover (portable-apps case).
+    $stamp = (Get-Date).ToUniversalTime().ToString('HH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
     # Audit P2-55: redact wider list of secret-shaped query params from URLs
     # before they hit the log. Extended vocabulary catches bearer tokens,
     # JWTs, OAuth/access/id tokens, session cookies, AWS signed-URL params,
