@@ -28,7 +28,7 @@ InstallerSwitches:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v0.3.0/GRAB-Setup.exe
-    InstallerSha256: __SHA256_PLACEHOLDER__
+    InstallerSha256: 9508052229B4897A7CD92747284991C8C39C9EABC13591B50A369F92BEFB2E8E
     # Programs and Features entry key -- must match AppId in GRAB-Setup.iss.
     ProductCode: '{2F1E5B4C-8A3D-4E9F-BE12-3C7A9D6E4B7F}_is1'
     AppsAndFeaturesEntries:

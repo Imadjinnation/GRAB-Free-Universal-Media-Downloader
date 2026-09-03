@@ -4,6 +4,34 @@ Version history and checkpoint notes. Latest at the top.
 
 ---
 
+## v0.3.0 · 2026-09-03 · Hygiene Pass (6 phases, ~160 fixes, distribution binaries)
+
+Six-phase pass focused on shipping GRAB as a "real" installable Windows app: registry-primary autostart, adaptive performance, first accessibility pass, uninstall completeness, auto-update check, and the full winget/scoop/exe/zip release pipeline. Test count grew from 342 to 461+.
+
+**Phase 1 · Foundation refactors** — single-source version constant (`$script:GrabVersion` in `src/utils.ps1`), atomic JSON writes, config mtime cache, unified `Invoke-GrabTokenReplace`, test-harness isolation via `GRAB_APP_DATA_OVERRIDE` / `GRAB_STARTUP_OVERRIDE` / `GRAB_RUN_KEY_OVERRIDE`.
+
+**Phase 2 · Fast tray startup + P0 fixes** — WPF assemblies deferred via `Ensure-WpfLoaded`; tray icon appears in ~1-2s vs. 5-8s previously.
+
+**Phase 3 · 25 P1 findings + PS-icon fix** — a11y first pass (`AutomationProperties.Name` everywhere, `IsDefault` / `IsCancel`, reduced-motion honored), taskbar-leak fix, modernized arcade tray menu renderer (last piece of native Windows chrome), test-suite performance.
+
+**Phase 4 · 31 P2 findings + 4 perf wins** — adaptive queue tick (2s→30s idle backoff, 15s on battery), battery-saver awareness via `SystemEvents.PowerModeChanged`, batched log writes with 1s flush, clipboard-watch timer gated on `clipboardWatch=true`.
+
+**Phase 4.5 · Second-pass audit corrections** — 4 P0s (HKCU\Run writes `wscript.exe grab-app.vbs` so no console flash, MinBtn double-underscore fix, popup-visibility gating for adaptive tick), 33 P1s, 33 P2s, 10 P3s. See `docs/audit-v0.3.0-pass2.md`. 76 corrective findings applied.
+
+**Phase 5 · Auto-update + migration + uninstall test** — daily `Check-ForUpdates` polls GitHub Releases API (grab + yt-dlp + gallery-dl) at most every 24h, existing-user migration prompt for v0.2.x users still on the OneDrive-fragile default folder, automated install-then-uninstall round-trip test under fully-overridden state, `-NoPackages` switch on uninstall.
+
+**Phase 5.5 · Distribution scaffolding** — `build/build-installer.ps1` reproducible build script (yt-dlp nightly + gallery-dl + ffmpeg-shared essentials, bundled), `build/GRAB-Setup.iss.template` Inno Setup wizard (per-user, no UAC), `build/winget/` three-file manifest, `build/scoop/grab.json` package manifest, `docs/smartscreen.md` explainer for unsigned binaries.
+
+**Phase 6 · Release cut** — ran `build-installer.ps1` for real; produced `GRAB-Setup.exe` + `GRAB-Portable-v0.3.0.zip` + `SHA256SUMS.txt`; filled real SHA256 into winget + scoop manifests; silent-install / silent-uninstall integration test confirms zero residue (registry, install dir, appdata, shortcuts); tagged `grab-v0.3.0` and pushed the subtree + tag to `grab-remote`; created the GitHub Release with all three artifacts attached. Build-script hardening: `Get-GalleryDl` walks recent releases to find the newest one that still ships an .exe (upstream stopped attaching binaries at v1.32.0).
+
+**Test count:** 461 → 461+ (green).
+
+**Files touched (cumulative):** every top-level `src/*.ps1`, `install.ps1`, `uninstall.ps1`, `grab-app.ps1`, `grab-app.vbs`, `tests/smoke.ps1`, `ui/*.xaml`, `docs/*.md`, `build/*` (whole new subtree), `CHANGELOG.md`, `README.md`.
+
+**Ships as:** winget (`imadjinnation.grab`), scoop (via `imadjinnation/scoop-bucket`), direct `.exe` installer, portable `.zip`, or dev clone (unchanged bootstrap via `install.ps1`).
+
+---
+
 ## v0.1.2 · 2026-09-02 · Polish pass (video quality, wrapping labels, dark About)
 
 Small three-item polish. Kept the current dark theme + warm gradient accent (`#F5A87A` -> `#E85F62`) untouched; new design language is being decided separately in another conversation.

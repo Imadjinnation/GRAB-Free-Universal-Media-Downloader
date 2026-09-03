@@ -11,7 +11,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v0.3.0/GRAB-Portable-v0.3.0.zip",
-            "hash": "sha256:REPLACE_WITH_ZIP_SHA256_AT_RELEASE_TIME"
+            "hash": "sha256:2830f6ed1c365c50f4809da1c0eb5dc7a045ab649dfba53d5b8153ee1343e6e2"
         }
     },
     "bin": [

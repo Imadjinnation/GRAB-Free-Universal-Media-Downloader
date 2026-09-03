@@ -2,9 +2,17 @@
 
 All notable changes to grab. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-09 - Hygiene Pass (Phase 4.5 second-audit corrections + Phase 5 auto-update / migration / uninstall-test + Phase 5.5 distribution scaffolding)
+## [0.3.0] - 2026-09-03 - Hygiene Pass (Phase 4.5 second-audit corrections + Phase 5 auto-update / migration / uninstall-test + Phase 5.5 distribution scaffolding + Phase 6 release cut)
 
-### Phase 5.5 additions (distribution scaffolding -- NOT YET RELEASED)
+### Phase 6 (release cut)
+
+- Ran `build/build-installer.ps1`: bundled yt-dlp nightly (sha256 verified), gallery-dl v1.31.10 (last upstream release that ships a Windows .exe -- upstream stopped attaching binaries at v1.32.0), and the ffmpeg-release-shared essentials.
+- Shipped three artifacts on the GitHub Release: `GRAB-Setup.exe` (Inno Setup wizard, per-user, no UAC), `GRAB-Portable-v0.3.0.zip` (extract-and-run), and `SHA256SUMS.txt`.
+- Filled the real SHA256 into `build/winget/Imadjinnation.GRAB.installer.yaml` and `build/scoop/grab.json`; submission to microsoft/winget-pkgs and creation of `imadjinnation/scoop-bucket` remain manual (commands documented in `build/winget/README.md` and `build/scoop/README.md`).
+- Silent-install / silent-uninstall integration test on a fresh sandbox directory confirms zero residue: HKCU\Run\GRAB gone, install dir gone, appdata gone, all shortcuts gone.
+- Build-script hardening: `Get-GalleryDl` now walks recent releases to find the newest one that still bundles `gallery-dl.exe` (was pinned to "latest"; started failing when upstream released 1.32.x without binaries).
+
+### Phase 5.5 additions (distribution scaffolding)
 
 - **`build/build-installer.ps1`** -- reproducible build script that downloads yt-dlp nightly (with sha256 verify), gallery-dl latest, and the ffmpeg-release-shared essentials build (extracts only `ffmpeg.exe` + required DLLs; drops `ffplay.exe`, `ffprobe.exe`, docs, includes), copies the GRAB payload, emits `dep-versions.json`, compiles `GRAB-Setup.exe` via Inno Setup, and packages `GRAB-Portable-v0.3.0.zip` alongside a `SHA256SUMS.txt`. Supports `-WhatIf` (dry-run), `-SkipDownload` (reuse `dist/payload/bin/`), `-NoZip`, `-NoInstaller`, and `-OutDir` (tests). Auto-installs 7-Zip and Inno Setup via winget when missing.
 - **`build/GRAB-Setup.iss.template`** -- Inno Setup wizard: per-user install (no UAC), MIT license page, welcome / dir / done wizard steps, optional Desktop shortcut, optional autostart via HKCU\Run\GRAB, optional Windows 11 tray-icon promotion, uninstall hook that runs our own `uninstall.ps1 -Yes -NoPackages` for a full clean sweep.

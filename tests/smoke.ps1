@@ -4273,7 +4273,7 @@ Test 'build-installer.ps1 downloads yt-dlp nightly + gallery-dl + ffmpeg' {
     $c = Get-Content $buildScript -Raw
     Assert-Match $c 'yt-dlp-nightly-builds'
     Assert-Match $c 'mikf/gallery-dl'
-    Assert-Match $c 'gyan\.dev/ffmpeg/builds/ffmpeg-release-shared'
+    Assert-Match $c 'gyan\.dev/ffmpeg/builds/ffmpeg-release[-\w]*shared'
 }
 
 Test 'build-installer.ps1 discards ffplay / ffprobe / docs from ffmpeg' {

@@ -150,13 +150,24 @@ function Get-GalleryDl {
     }
     if ($WhatIfPreference) { Say 'WHATIF: would download gallery-dl latest'; return 'WHATIF' }
 
-    $api  = 'https://api.github.com/repos/mikf/gallery-dl/releases/latest'
-    $rel  = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'grab-build/0.3.0' } -TimeoutSec 30
-    $tag  = [string]$rel.tag_name
-    $exe  = $rel.assets | Where-Object { $_.name -ieq 'gallery-dl.exe' } | Select-Object -First 1
-    if (-not $exe) { throw 'no gallery-dl.exe asset in latest release' }
+    # NOTE: gallery-dl stopped attaching pre-built Windows binaries to
+    # releases starting v1.32.0 (source-only distribution via PyPI/PEP517).
+    # We walk back through recent releases until we find one that still
+    # bundles gallery-dl.exe (v1.31.10 is the last one as of 2026-09).
+    # When upstream resumes shipping binaries, this picks the newest
+    # automatically. If none of the recent releases have it, we fail.
+    $ua      = @{ 'User-Agent' = 'grab-build/0.3.0' }
+    $rels    = Invoke-RestMethod -Uri 'https://api.github.com/repos/mikf/gallery-dl/releases?per_page=50' -Headers $ua -TimeoutSec 30
+    $picked  = $null
+    foreach ($r in $rels) {
+        if ($r.draft) { continue }
+        $a = $r.assets | Where-Object { $_.name -ieq 'gallery-dl.exe' } | Select-Object -First 1
+        if ($a) { $picked = [pscustomobject]@{ Tag = [string]$r.tag_name; Asset = $a }; break }
+    }
+    if (-not $picked) { throw 'no gallery-dl.exe asset in any of the last 50 releases (upstream may have permanently stopped shipping binaries)' }
+    $tag  = $picked.Tag
     $dest = Join-Path $script:Bin 'gallery-dl.exe'
-    Save-Url -Url $exe.browser_download_url -Dest $dest
+    Save-Url -Url $picked.Asset.browser_download_url -Dest $dest
     Ok "gallery-dl $tag installed at $dest"
     return $tag
 }
@@ -194,7 +205,12 @@ function Get-Ffmpeg {
     }
     $sevenZipExe = $sevenZip.Source
 
-    $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-shared.7z'
+    # NOTE: gyan.dev renamed the release-shared build to release-full-shared
+    # (they consolidated the "release-shared" and "release-full-shared"
+    # variants under one file). We still discard everything except
+    # ffmpeg.exe + the shared DLLs listed in $keep below, so the extra bloat
+    # doesn't reach the payload.
+    $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z'
     $arc = Join-Path $script:Tmp 'ffmpeg-release-shared.7z'
     Save-Url -Url $url -Dest $arc
     $extractDir = Join-Path $script:Tmp 'ffmpeg-extract'
@@ -306,16 +322,27 @@ function Invoke-InnoSetup {
     param([string]$IssPath)
     Section 'Compile installer (iscc.exe)'
     $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+    # Well-known install paths: machine-wide 32-bit, 64-bit, and per-user
+    # (winget with --scope user, or the direct Inno Setup installer's default).
+    $probes = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+    )
+    if (-not $iscc) {
+        foreach ($p in $probes) {
+            if (Test-Path -LiteralPath $p) { $iscc = [pscustomobject]@{ Source = $p }; break }
+        }
+    }
     if (-not $iscc) {
         Say 'iscc.exe not on PATH; attempting winget install JRSoftware.InnoSetup ...'
         if ($WhatIfPreference) { Say 'WHATIF: would winget install Inno Setup'; return }
         $winget = Get-Command winget -ErrorAction SilentlyContinue
         if (-not $winget) { throw 'winget not available; install Inno Setup manually from https://jrsoftware.org/isdl.php' }
-        winget install --exact --id JRSoftware.InnoSetup --accept-source-agreements --accept-package-agreements --silent | Out-Null
-        $iscc = Get-Command iscc -ErrorAction SilentlyContinue
-        if (-not $iscc) {
-            $probe = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
-            if (Test-Path -LiteralPath $probe) { $iscc = [pscustomobject]@{ Source = $probe } }
+        # --scope user avoids a UAC prompt (which would hang a background build).
+        winget install --exact --id JRSoftware.InnoSetup --scope user --accept-source-agreements --accept-package-agreements --silent | Out-Null
+        foreach ($p in $probes) {
+            if (Test-Path -LiteralPath $p) { $iscc = [pscustomobject]@{ Source = $p }; break }
         }
         if (-not $iscc) { throw 'Inno Setup install failed; run again after installing manually' }
     }
