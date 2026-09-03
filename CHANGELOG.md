@@ -2,7 +2,17 @@
 
 All notable changes to grab. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-09 - Hygiene Pass (Phase 4.5 second-audit corrections included)
+## [0.3.0] - 2026-09 - Hygiene Pass (Phase 4.5 second-audit corrections + Phase 5 auto-update / migration / uninstall-test)
+
+### Phase 5 additions
+
+- Daily auto-update check: `Check-ForUpdates` polls the GitHub Releases API for grab, yt-dlp, and gallery-dl at most once every 24 h; a balloon toast fires when a newer grab release is available and clicking it opens the Releases page. Dependency updates (yt-dlp / gallery-dl) log-only in Phase 5; auto-download-and-swap is deferred to Phase 5.5+ once installer plumbing lands. ffmpeg intentionally excluded (rarely updated, large). 404 / 403 / network failures are swallowed silently. Config keys: `autoUpdateCheck` (default true), `lastGrabUpdateCheck`, `lastToolUpdateCheck`. Settings row: **Updates -> Check daily for new grab / yt-dlp / gallery-dl versions**.
+- Existing-user migration prompt: when an upgrading v0.2.x user's `downloadFolder` still points at the OneDrive-fragile `~\Downloads\imadjinn-grab` default, the tray fires a one-time balloon on startup suggesting they move to the new default; clicking opens Settings. Guarded by `migrationV030PromptShown` so it fires exactly once regardless of the user's choice. Non-destructive -- never rewrites the folder.
+- Automated uninstall-completeness test: new `tests\smoke.ps1` case drives an install-then-uninstall round-trip under `GRAB_APP_DATA_OVERRIDE` / `GRAB_STARTUP_OVERRIDE` / `GRAB_RUN_KEY_OVERRIDE` / `GRAB_DESKTOP_OVERRIDE` so no real machine state is touched. `uninstall.ps1` now honors those overrides and gains a public `-NoPackages` switch that skips the pip / BurntToast step.
+- README `## Downgrading` section: winget one-liner + manual v0.2.2 installer path + link to file an issue. README `## Updates` section documents the daily check + how to turn it off.
+- Tray balloon dispatch refactor: `BalloonNextAction` script-scoped scriptblock lets update / migration balloons route their own click handlers (open Releases page, open Settings) instead of all balloons falling into the popup-open default.
+
+### Phase 4.5 corrections (80-finding second-pass audit)
 
 ### Phase 4.5 corrections (80-finding second-pass audit)
 

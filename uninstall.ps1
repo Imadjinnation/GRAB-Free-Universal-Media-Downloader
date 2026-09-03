@@ -30,12 +30,34 @@
 param(
     [switch]$Yes,
     [switch]$KeepState,
-    [switch]$RevertPSGallery
+    [switch]$RevertPSGallery,
+    # Phase 5: skip the pip / PS-module uninstall step entirely. Used by
+    # tests\smoke.ps1's automated uninstall completeness test to avoid
+    # touching real machine-wide pip packages when driving `-Yes` under
+    # env-var isolation. Public switch so power users can also request
+    # "clean up my grab install without touching my other Python tools".
+    [switch]$NoPackages
 )
 
 $ErrorActionPreference = 'Continue'
 $script:Removed = @()
 $script:Kept    = @()
+
+# Test hooks (Phase 5): redirect every filesystem/registry op to temp
+# locations so `tests\smoke.ps1` can drive an end-to-end uninstall against
+# a simulated install without touching the user's real machine. See
+# `Test 'uninstall.ps1 -Yes leaves NO grab-related state on the system'`
+# for the invocation shape.
+#   GRAB_APP_DATA_OVERRIDE : redirects %APPDATA%\grab-app (already honored
+#                            by src/utils.ps1; uninstall reads $env: below).
+#   GRAB_DESKTOP_OVERRIDE  : one extra path added to the desktop candidate
+#                            list so a test-only .lnk gets cleaned.
+#   GRAB_STARTUP_OVERRIDE  : ditto for the Startup folder shortcut path.
+#   GRAB_RUN_KEY_OVERRIDE  : redirects HKCU\Run\GRAB removal.
+$script:AppDataRoot     = if ($env:GRAB_APP_DATA_OVERRIDE) { $env:GRAB_APP_DATA_OVERRIDE } else { Join-Path $env:APPDATA 'grab-app' }
+$script:ExtraDesktop    = $env:GRAB_DESKTOP_OVERRIDE
+$script:ExtraStartup    = $env:GRAB_STARTUP_OVERRIDE
+$script:RunKeyRoot      = if ($env:GRAB_RUN_KEY_OVERRIDE) { $env:GRAB_RUN_KEY_OVERRIDE } else { 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
 
 function Say([string]$msg, [string]$color = 'Gray') { Write-Host "  $msg" -ForegroundColor $color }
 function Section([string]$t) { Write-Host ""; Write-Host "  == $t ==" -ForegroundColor Cyan }
@@ -76,7 +98,8 @@ Section 'Desktop shortcuts'
 $desktopCandidates = @(
     [Environment]::GetFolderPath('Desktop'),
     (Join-Path $env:USERPROFILE 'Desktop'),
-    (Join-Path $env:USERPROFILE 'OneDrive\Desktop')
+    (Join-Path $env:USERPROFILE 'OneDrive\Desktop'),
+    $script:ExtraDesktop
 ) | Where-Object { $_ } | Select-Object -Unique
 foreach ($desk in $desktopCandidates) {
     if (-not (Test-Path -LiteralPath $desk)) { continue }
@@ -93,7 +116,8 @@ Section 'Autostart'
 $startupCandidates = @(
     [Environment]::GetFolderPath('Startup'),
     (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'),
-    (Join-Path $env:USERPROFILE 'OneDrive\Microsoft\Windows\Start Menu\Programs\Startup')
+    (Join-Path $env:USERPROFILE 'OneDrive\Microsoft\Windows\Start Menu\Programs\Startup'),
+    $script:ExtraStartup
 ) | Where-Object { $_ } | Select-Object -Unique
 $removedAny = $false
 foreach ($su in $startupCandidates) {
@@ -106,15 +130,17 @@ foreach ($su in $startupCandidates) {
 if (-not $removedAny) { Skip 'no autostart shortcut' }
 
 # HKCU\Run\GRAB (v0.3.0 primary autostart) -- ALWAYS present when autostart on.
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+# Phase 5: obeys GRAB_RUN_KEY_OVERRIDE so tests can point removal at a
+# throwaway HKCU subkey.
+$runKey = $script:RunKeyRoot
 try {
     if (Get-ItemProperty -Path $runKey -Name 'GRAB' -ErrorAction SilentlyContinue) {
         Remove-ItemProperty -Path $runKey -Name 'GRAB' -Force -ErrorAction Stop
-        Ok "removed HKCU\Run\GRAB"
+        Ok "removed $runKey\GRAB"
     } else {
-        Skip 'no HKCU\Run\GRAB entry'
+        Skip "no $runKey\GRAB entry"
     }
-} catch { Warn "couldn't remove HKCU\Run\GRAB: $_" }
+} catch { Warn "couldn't remove ${runKey}\GRAB: $_" }
 
 # Tray promotion key (v0.3.0). Best-effort; matched by stable GUID.
 $grabGuid  = '{f3e2c9a1-4b8e-4d3a-9c1b-5e6a7b8c9d0e}'
@@ -128,7 +154,10 @@ try {
 
 # --- 4. App-data folder + assorted scratch --------------------------------
 Section 'App data'
-$appData = Join-Path $env:APPDATA 'grab-app'
+# Phase 5: honor GRAB_APP_DATA_OVERRIDE so the automated uninstall test can
+# point %APPDATA%\grab-app at a temp folder for the whole install/uninstall
+# round-trip.
+$appData = $script:AppDataRoot
 if (Test-Path -LiteralPath $appData) {
     $doIt = $Yes
     if (-not $KeepState -and -not $Yes) {
@@ -171,7 +200,11 @@ if (Test-Path -LiteralPath $appData) {
 # --- 5. pip packages ----------------------------------------------------
 Section 'pip packages (yt-dlp, gallery-dl, BurntToast)'
 $doPkg = $Yes
-if (-not $Yes) {
+if ($NoPackages) {
+    $doPkg = $false
+    Skip 'pip packages step skipped (-NoPackages)'
+}
+if (-not $Yes -and -not $NoPackages) {
     Write-Host ""
     Write-Host "  Uninstall pip packages: yt-dlp, gallery-dl?" -ForegroundColor Yellow
     Write-Host "  Other tools on this machine may use them -- BurntToast is a common PS module." -ForegroundColor DarkGray

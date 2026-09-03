@@ -333,6 +333,15 @@
                       Content="Launch grab automatically when Windows starts"
                       AutomationProperties.Name="Launch at Windows startup"/>
 
+            <!-- Updates section (Phase 5) -->
+            <TextBlock Style="{StaticResource SectionHeader}" Text="UPDATES"/>
+            <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>
+            <CheckBox x:Name="AutoUpdateCheck" Style="{StaticResource ArcadeCheck}"
+                      Content="Check daily for new grab / yt-dlp / gallery-dl versions"
+                      AutomationProperties.Name="Check for updates daily"/>
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Reads GitHub Releases (at most once per 24h). We show a toast when a new grab version is available and log dependency updates -- nothing is auto-downloaded."/>
+
             <!-- About -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ABOUT"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>

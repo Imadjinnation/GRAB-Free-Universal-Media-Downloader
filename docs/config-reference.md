@@ -26,6 +26,10 @@ Written atomically (UTF-8, no BOM) via `Write-JsonAtomic`. Deleting the file cau
 | `sensitiveSites` | `[]` | Array of case-insensitive URL substring patterns that auto-route to `.private`. One entry per line in the Settings textarea. |
 | `sensitiveFolderName` | `.private` | Folder name inserted between category and domain for sensitive downloads. Windows `Hidden` attribute is applied. |
 | `crtScanlines` | `true` | Toggles the static CRT scanline overlay in the popup / settings / About windows. |
+| `autoUpdateCheck` | `true` | When `true`, the tray polls GitHub Releases (grab + yt-dlp + gallery-dl) at most once every 24 h. Balloon-toasts a new grab release; log-only for dependency updates. ffmpeg is intentionally excluded. |
+| `lastGrabUpdateCheck` | `''` | ISO-8601 UTC timestamp of the last successful (or attempted) GitHub Releases poll. Written whether or not any repo returned a new version. Used by the 24 h throttle in `Check-ForUpdates`. |
+| `lastToolUpdateCheck` | `''` | Sibling of `lastGrabUpdateCheck` reserved for the yt-dlp / gallery-dl checks; currently updated in lock-step but split so a future auto-download pass can throttle dependency checks separately. |
+| `migrationV030PromptShown` | `false` | Set to `true` after the v0.3.0 upgrade balloon has been shown once (nudging users off the OneDrive-fragile `~\Downloads\imadjinn-grab` default). Prevents the prompt from re-firing on every login. |
 
 ## Migration + back-fill
 
@@ -33,7 +37,7 @@ Every load runs through `Get-Config` in `src/utils.ps1`:
 
 1. If the file is missing, write fresh defaults.
 2. If it exists, parse it. On parse failure, back up + rewrite defaults.
-3. Back-fill new keys that legacy configs lack (`sensitiveSites`, `sensitiveByDefault`, `sensitiveFolderName`, `videoQuality`, `crtScanlines`).
+3. Back-fill new keys that legacy configs lack (`sensitiveSites`, `sensitiveByDefault`, `sensitiveFolderName`, `videoQuality`, `crtScanlines`, `autoUpdateCheck`, `lastGrabUpdateCheck`, `lastToolUpdateCheck`, `migrationV030PromptShown`).
 4. If `version` differs from `Get-GrabVersion`, bump + persist.
 
 The parsed object is cached in-process; the cache invalidates on `LastWriteTimeUtc` change (external edits still get picked up).
@@ -48,7 +52,8 @@ The parsed object is cached in-process; the cache invalidates on `LastWriteTimeU
 - `GRAB_APP_DATA_OVERRIDE` -- redirects the config + queue + recent + logs to a temp folder (tests only).
 - `GRAB_TESTS_SKIP_ENGINES` -- skips actual yt-dlp / gallery-dl invocation.
 - `GRAB_STARTUP_OVERRIDE` -- points `Get-LocalStartupPath` at a temp folder so `Set-Autostart` doesn't touch the user's real Startup folder in tests.
-- `GRAB_RUN_KEY_OVERRIDE` -- redirects `Set-AutostartRegistry` writes to an alternative registry path so tests never touch the user's real `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GRAB`. Set to a full `HKCU:\...\Run` path (audit v0.3.0-pass2 finding 61).
+- `GRAB_RUN_KEY_OVERRIDE` -- redirects `Set-AutostartRegistry` writes to an alternative registry path so tests never touch the user's real `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GRAB`. Set to a full `HKCU:\...\Run` path (audit v0.3.0-pass2 finding 61). Phase 5: `uninstall.ps1` honors this override too, so the automated uninstall-completeness test can drive removal against a throwaway subkey.
+- `GRAB_DESKTOP_OVERRIDE` -- Phase 5: an extra desktop-shortcut candidate path `uninstall.ps1` scans (in addition to `[Environment]::GetFolderPath('Desktop')` and the OneDrive-redirected variant). Set by the uninstall-completeness test so the shortcut it drops into a temp folder gets cleaned up.
 
 ## Reddit routing note
 

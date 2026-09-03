@@ -23,11 +23,17 @@ Add-Type -AssemblyName System.Drawing        | Out-Null
 $script:Tray            = $null
 $script:TickTimer       = $null
 $script:ClipTimer       = $null
+$script:UpdateTimer     = $null   # Phase 5: daily GitHub Releases poll
 $script:LastClipboardUrl = ''
 $script:PopupShow       = $null   # callback set by grab-app.ps1: opens popup on a given tab
 $script:SettingsShow    = $null   # callback: opens settings window
 $script:OnQuit          = $null   # callback: extra cleanup
 $script:Dispatcher      = $null   # WPF Dispatcher for the main STA thread
+# Phase 5: routes the next BalloonTipClicked to a specific action instead of
+# the default "open popup". Set right before ShowBalloonTip; cleared when
+# fired or closed. A scriptblock (any argument-taking is fine); null means
+# "fall back to the default popup-paste action".
+$script:BalloonNextAction = $null
 
 # ---------- Icon loading --------------------------------------------------
 
@@ -1082,6 +1088,27 @@ function Sync-ClipTimer {
     }
 }
 
+function Invoke-UpdateCheckAndNotify {
+    # Phase 5: called from the UpdateTimer. Runs Check-ForUpdates (which
+    # applies its own 24h throttle), then fires a balloon toast when a new
+    # GRAB release is available. Dependency updates (yt-dlp / gallery-dl)
+    # log-only in Phase 5 -- the auto-download-and-swap flow is deferred to
+    # Phase 5.5+ once the installer plumbing lands. Never throws.
+    try {
+        $r = Check-ForUpdates
+        if ($r.Skipped) { return }
+        if ($r.GrabNewer -and $script:Tray) {
+            $url = $r.GrabUrl
+            $script:BalloonNextAction = { try { Start-Process $url } catch { Log-Warn "auto-update: open releases page failed: $($_.Exception.Message)" } }.GetNewClosure()
+            $script:Tray.ShowBalloonTip(
+                8000,
+                'grab update available',
+                ("GRAB v{0} is available -- click to open the Releases page." -f $r.GrabLatest),
+                [System.Windows.Forms.ToolTipIcon]::Info)
+        }
+    } catch { Log-Warn "Invoke-UpdateCheckAndNotify: $($_.Exception.Message)" }
+}
+
 function Start-Timers {
     # We use WPF DispatcherTimer instead of WinForms.Timer because the main
     # loop is Dispatcher.Run (see Start-Tray). DispatcherTimer fires on the
@@ -1154,6 +1181,31 @@ function Start-Timers {
     $script:LogFlushTimer.Add_Tick({ try { Flush-LogQueue } catch {} })
     $script:LogFlushTimer.Start()
 
+    # Phase 5: daily auto-update poll. Interval is 6h -- Check-ForUpdates
+    # applies its own 24h throttle, so 6h is a cheap "roughly daily" cadence
+    # that also catches a newly-released version within 6h of a user leaving
+    # the tray running for days. First tick fires ~60s post-startup so the
+    # network hit never delays time-to-tray-visible.
+    $script:UpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:UpdateTimer.Interval = [TimeSpan]::FromHours(6)
+    $firstUpdateFired = $false
+    $script:UpdateTimer.Add_Tick({
+        # First tick lands 6h in; kick a one-shot 60s after Start-Timers so
+        # the check happens on every fresh launch (still guarded by the 24h
+        # throttle inside Check-ForUpdates).
+        try { Invoke-UpdateCheckAndNotify } catch {}
+    })
+    $script:UpdateTimer.Start()
+    # One-shot delayed initial check.
+    $initialCheck = New-Object System.Windows.Threading.DispatcherTimer
+    $initialCheck.Interval = [TimeSpan]::FromSeconds(60)
+    $initialCheckLocal = $initialCheck
+    $initialCheck.Add_Tick({
+        try { $initialCheckLocal.Stop() } catch {}
+        try { Invoke-UpdateCheckAndNotify } catch {}
+    })
+    $initialCheck.Start()
+
     # Battery / power-mode awareness (PERF-2). PowerModeChanged fires for
     # StatusChange (battery <-> AC transitions, battery-saver toggle) and
     # Suspend/Resume. We pause the queue tick on Suspend and refresh the
@@ -1196,6 +1248,7 @@ function Stop-Timers {
     if ($script:TickTimer)     { try { $script:TickTimer.Stop() }     catch {} }
     if ($script:ClipTimer)     { try { $script:ClipTimer.Stop() }     catch {} }
     if ($script:LogFlushTimer) { try { $script:LogFlushTimer.Stop() } catch {} }
+    if ($script:UpdateTimer)   { try { $script:UpdateTimer.Stop() }   catch {} }
     # Unhook the PowerModeChanged handler so we don't leak it across restarts.
     if ($script:PowerModeHandler) {
         try { [Microsoft.Win32.SystemEvents]::remove_PowerModeChanged($script:PowerModeHandler) } catch {}
@@ -1247,8 +1300,20 @@ function Start-Tray {
             if ($script:PopupShow) { & $script:PopupShow 'paste' }
         }
     })
-    # Balloon click also summons popup
-    $script:Tray.add_BalloonTipClicked({ if ($script:PopupShow) { & $script:PopupShow 'paste' } })
+    # Balloon click routes to the pending BalloonNextAction (if set by an
+    # auto-update or migration balloon) and otherwise falls back to opening
+    # the popup on the Paste tab. BalloonTipClosed clears the pending action
+    # so a stale click after the balloon has timed out does the default thing.
+    $script:Tray.add_BalloonTipClicked({
+        $action = $script:BalloonNextAction
+        $script:BalloonNextAction = $null
+        if ($action) {
+            try { & $action } catch { Log-Warn "balloon-click action failed: $($_.Exception.Message)" }
+            return
+        }
+        if ($script:PopupShow) { & $script:PopupShow 'paste' }
+    })
+    $script:Tray.add_BalloonTipClosed({ $script:BalloonNextAction = $null })
 
     # Windows 11 tray promotion: mark this app's tray icon as promoted so it
     # sits directly in the taskbar tray, not hidden under the up-caret. Every
@@ -1271,6 +1336,14 @@ function Start-Tray {
     # prior process (crashed / killed / rebooted) has no live PS Job. Reset
     # them to pending so the tick timer picks them up cleanly.
     try { Recover-OrphanedJobs } catch { Log-Warn "recover sweep failed: $($_.Exception.Message)" }
+
+    # Phase 5: one-time migration nudge. When a v0.2.x user upgrades and
+    # their downloadFolder still points at the OneDrive-fragile default
+    # (~\Downloads\imadjinn-grab), fire a balloon suggesting they move it
+    # to the new default via Settings. Guarded by migrationV030PromptShown
+    # so this only ever fires once. Non-destructive: we never rewrite the
+    # folder without their consent.
+    try { Invoke-MigrationPromptIfNeeded } catch { Log-Warn "migration prompt failed: $($_.Exception.Message)" }
 
     Start-Timers
 
@@ -1467,6 +1540,62 @@ function Invoke-SelfHealSweep {
             }
         }
     } catch {}
+}
+
+function Test-IsOneDriveFragileDownloadFolder([string]$folder) {
+    # Phase 5 migration heuristic. Returns $true when the download folder
+    # matches the pre-v0.1.1 default that sat under ~\Downloads (which is
+    # exactly where OneDrive's known-folder redirection likes to eat files).
+    # We match by folder-name suffix, not exact path, so a Windows account
+    # rename or different profile-root doesn't miss the match.
+    if ([string]::IsNullOrWhiteSpace($folder)) { return $false }
+    return ($folder -like '*\Downloads\imadjinn-grab' -or $folder -like '*/Downloads/imadjinn-grab')
+}
+
+function Invoke-MigrationPromptIfNeeded {
+    # Phase 5: fires ONCE per install. When an existing v0.2.x config still
+    # points at the OneDrive-fragile ~\Downloads\imadjinn-grab folder, we
+    # surface a one-time balloon suggesting the user move it to the new
+    # default. Marking migrationV030PromptShown=true regardless of the
+    # user's choice ensures we never nag twice.
+    $cfg = $null
+    try { $cfg = Get-Config } catch { return }
+    if (-not $cfg) { return }
+    # Case-insensitive property check (audit v0.3.0-pass2 finding 62).
+    $hasProp = { param($o,$n) foreach ($p in $o.PSObject.Properties.Name) { if ($p -ieq $n) { return $true } } return $false }
+    $alreadyShown = $false
+    if (& $hasProp $cfg 'migrationV030PromptShown') {
+        $alreadyShown = [bool]$cfg.migrationV030PromptShown
+    }
+    if ($alreadyShown) { return }
+    if (-not (Test-IsOneDriveFragileDownloadFolder ([string]$cfg.downloadFolder))) {
+        # Nothing to migrate; still stamp the flag so a later folder-move
+        # into the fragile path doesn't retro-nag them.
+        try { Update-Config @{ migrationV030PromptShown = $true } | Out-Null } catch {}
+        return
+    }
+    $newDefault = Get-DownloadFolderDefault
+    Log-Warn "existing config has OneDrive-fragile downloadFolder ($($cfg.downloadFolder)); new default would be $newDefault"
+    if ($script:Tray) {
+        # Route the balloon click into Settings so the user can change the
+        # folder immediately. If SettingsShow isn't wired (very early
+        # startup edge), fall back to opening the Settings folder path.
+        $script:BalloonNextAction = {
+            try {
+                if ($script:SettingsShow) { & $script:SettingsShow }
+            } catch { Log-Warn "migration balloon-click: $($_.Exception.Message)" }
+        }.GetNewClosure()
+        $script:Tray.ShowBalloonTip(
+            10000,
+            'grab v0.3.0 -- move download folder?',
+            ("Your download folder ($($cfg.downloadFolder)) is inside ~/Downloads, where OneDrive can sync-shuffle files. `n" +
+             "GRAB v0.3.0 recommends moving to $newDefault. `n" +
+             'Click to open Settings and change it.'),
+            [System.Windows.Forms.ToolTipIcon]::Info)
+    }
+    # Stamp the flag whether or not the balloon actually rendered so we
+    # don't nag on every launch.
+    try { Update-Config @{ migrationV030PromptShown = $true } | Out-Null } catch {}
 }
 
 function Stop-Tray {

@@ -355,6 +355,24 @@ function Get-Config {
         # look after upgrading. Users can uncheck it in Settings > Display.
         $cfg | Add-Member -MemberType NoteProperty -Name crtScanlines -Value $true -Force
     }
+    # Phase 5: auto-update daily check + tracking keys.
+    if (-not (& $hasProp $cfg 'autoUpdateCheck')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name autoUpdateCheck -Value $true -Force
+    }
+    if (-not (& $hasProp $cfg 'lastGrabUpdateCheck')) {
+        # ISO-8601 UTC timestamp of the last GitHub Releases poll, or ''.
+        $cfg | Add-Member -MemberType NoteProperty -Name lastGrabUpdateCheck -Value '' -Force
+    }
+    if (-not (& $hasProp $cfg 'lastToolUpdateCheck')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name lastToolUpdateCheck -Value '' -Force
+    }
+    # Phase 5: existing-user migration hint. If the on-disk downloadFolder
+    # matches the pre-v0.1.1 OneDrive-fragile default, surface a one-time
+    # balloon nudging the user to move to the new default. Non-destructive
+    # -- we never rewrite their folder without their consent.
+    if (-not (& $hasProp $cfg 'migrationV030PromptShown')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name migrationV030PromptShown -Value $false -Force
+    }
     # Version migration: if the on-disk config predates the current grab
     # release, bump its version stamp and persist. Prevents drift like the
     # v0.1.0 -> v0.2.2 gap that made every audit start with a stale config.
@@ -626,6 +644,199 @@ function Send-Toast([string]$title, [string]$body, [string]$action = $null) {
         # generic notify) so debugging output is visually consistent.
         Write-Host "[toast] $title -- $body" -ForegroundColor Magenta
     }
+}
+
+# ---------- Auto-update daily check (Phase 5) ------------------------------
+# Polls GitHub Releases at most once per 24 hours for:
+#   1. grab itself (imadjinnation/GRAB-Free-Universal-Media-Downloader)
+#   2. yt-dlp (yt-dlp/yt-dlp) -- compared against the local yt-dlp --version
+#   3. gallery-dl (mikf/gallery-dl) -- compared against the local --version
+# ffmpeg is intentionally skipped (rarely updated, large, and winget already
+# handles it in install.ps1). All network I/O is best-effort with a 5s timeout:
+# 404 (no releases yet) and 403 (rate limit) are swallowed silently so a
+# GitHub outage never surfaces user-visible noise. New GRAB versions fire a
+# balloon toast; new dependency versions log-only in Phase 5 (auto-download
+# and swap deferred to Phase 5.5+ once the installer plumbing lands).
+#
+# Repos (URLs kept explicit so grep can find them; the /latest endpoint
+# returns the highest non-prerelease semver-shaped tag).
+$script:GrabReleasesLatest      = 'https://api.github.com/repos/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/latest'
+$script:GrabReleasesHtml        = 'https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases'
+$script:YtDlpReleasesLatest     = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+$script:GalleryDlReleasesLatest = 'https://api.github.com/repos/mikf/gallery-dl/releases/latest'
+
+function _NormalizeGrabTag([string]$tag) {
+    # Strip any leading 'grab-v' or 'v' prefix. Handles 'grab-v0.3.0',
+    # 'v0.3.0', '0.3.0' identically -> '0.3.0'.
+    if ([string]::IsNullOrEmpty($tag)) { return '' }
+    return ($tag -replace '^grab-','' -replace '^v','').Trim()
+}
+
+function _CompareSemver([string]$a, [string]$b) {
+    # Returns -1 / 0 / 1 the same way [System.Version] would, but tolerant of
+    # non-numeric segments (yt-dlp nightly uses 2024.10.22.213947, gallery-dl
+    # uses 1.27.5). Falls back to string compare on parse failure.
+    if ([string]::IsNullOrEmpty($a) -and [string]::IsNullOrEmpty($b)) { return 0 }
+    if ([string]::IsNullOrEmpty($a)) { return -1 }
+    if ([string]::IsNullOrEmpty($b)) { return  1 }
+    try {
+        $va = [System.Version]::Parse($a)
+        $vb = [System.Version]::Parse($b)
+        return $va.CompareTo($vb)
+    } catch {}
+    return [string]::Compare($a, $b, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Invoke-GitHubLatest {
+    # Wrapper around Invoke-RestMethod for the /releases/latest endpoint.
+    # Returns the parsed PSCustomObject on success; $null on any failure
+    # (404 no releases, 403 rate limit, network, TLS, timeout, DNS). Tests
+    # inject Invoke-RestMethod via the pipeline (see smoke.ps1); this helper
+    # is a thin seam we can mock.
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [int]$TimeoutSec = 5
+    )
+    try {
+        # UA is required by GitHub's REST API or it 403s every call.
+        $ua = 'grab/' + (Get-GrabVersion) + ' (+https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader)'
+        return Invoke-RestMethod -Uri $Url -Method Get -Headers @{ 'User-Agent' = $ua } -TimeoutSec $TimeoutSec -ErrorAction Stop
+    } catch {
+        return $null
+    }
+}
+
+function _ToolInstalledVersion([string]$name) {
+    # Runs `<tool> --version` and returns the trimmed first line, or ''.
+    # No exception ever escapes -- a missing tool just returns ''.
+    try {
+        $exe = Resolve-Tool $name
+        if (-not $exe) { return '' }
+        $out = & $exe --version 2>&1
+        if ($LASTEXITCODE -ne 0) { return '' }
+        if ($out -is [array]) { $out = $out[0] }
+        return ($out.ToString()).Trim()
+    } catch { return '' }
+}
+
+function Check-ForUpdates {
+    # Public entrypoint. Called from the tray timer at most once per 24h.
+    # Returns a summary hashtable so tests can assert what happened without
+    # tapping the balloon-toast UI. The tray wires the returned hashtable's
+    # GrabNewer flag to a ShowBalloonTip + configures the click handler.
+    #
+    # Side effects:
+    #   - Reads config for lastGrabUpdateCheck / lastToolUpdateCheck.
+    #   - Writes them via Update-Config on a real (non-skipped) check.
+    #   - Logs each outcome.
+    # Never throws; every network failure surfaces as Ok=$false and null tag.
+    param(
+        [switch]$Force,        # bypass the 24h skip (for manual "check now")
+        [scriptblock]$Fetcher  # test hook: takes $url, returns PSCustomObject
+    )
+    $result = [ordered]@{
+        Skipped         = $false
+        Reason          = ''
+        GrabLatest      = $null    # e.g. '0.4.0'
+        GrabCurrent     = Get-GrabVersion
+        GrabNewer       = $false
+        GrabUrl         = $script:GrabReleasesHtml
+        YtDlpLatest     = $null
+        YtDlpCurrent    = $null
+        YtDlpNewer      = $false
+        GalleryDlLatest = $null
+        GalleryDlCurrent = $null
+        GalleryDlNewer  = $false
+    }
+    $cfg = $null
+    try { $cfg = Get-Config } catch { $result.Skipped = $true; $result.Reason = 'config-unavailable'; return $result }
+    if (-not $Force -and -not $cfg.autoUpdateCheck) {
+        $result.Skipped = $true; $result.Reason = 'disabled-in-config'
+        return $result
+    }
+    # 24-hour throttle. lastGrabUpdateCheck is an ISO-8601 UTC string; parse
+    # with InvariantCulture to avoid the local-date DST bug (audit finding 55).
+    if (-not $Force) {
+        try {
+            if ($cfg.lastGrabUpdateCheck) {
+                $last = [datetime]::ParseExact(
+                    [string]$cfg.lastGrabUpdateCheck,
+                    'o', [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind)
+                $ageHours = ([datetime]::UtcNow - $last).TotalHours
+                if ($ageHours -lt 24) {
+                    $result.Skipped = $true
+                    $result.Reason  = ('throttled:{0:N1}h since last check' -f $ageHours)
+                    return $result
+                }
+            }
+        } catch { Log-Warn "Check-ForUpdates: bad lastGrabUpdateCheck ('$($cfg.lastGrabUpdateCheck)'); treating as never-checked." }
+    }
+    # Fetch each release. When a $Fetcher scriptblock is provided (tests), use
+    # it in place of Invoke-GitHubLatest so a fake response can drive assertions.
+    $fetch = if ($Fetcher) { $Fetcher } else { { param($u) Invoke-GitHubLatest -Url $u } }
+
+    # ---- grab ------------------------------------------------------------
+    try {
+        $r = & $fetch $script:GrabReleasesLatest
+        if ($r -and $r.tag_name) {
+            $latest = _NormalizeGrabTag ([string]$r.tag_name)
+            $result.GrabLatest = $latest
+            if ((_CompareSemver $latest (Get-GrabVersion)) -gt 0) {
+                $result.GrabNewer = $true
+                Log-Info "auto-update: GRAB v$latest available (current $($result.GrabCurrent))"
+            } else {
+                Log-Info "auto-update: GRAB is current (v$($result.GrabCurrent))"
+            }
+            if ($r.html_url) { $result.GrabUrl = [string]$r.html_url }
+        } else {
+            Log-Info 'auto-update: no GRAB release found (404 / rate-limited / offline) -- skipping silently'
+        }
+    } catch { Log-Warn "auto-update GRAB check failed: $($_.Exception.Message)" }
+
+    # ---- yt-dlp ----------------------------------------------------------
+    try {
+        $result.YtDlpCurrent = _ToolInstalledVersion 'yt-dlp'
+        if ($result.YtDlpCurrent) {
+            $r = & $fetch $script:YtDlpReleasesLatest
+            if ($r -and $r.tag_name) {
+                $latest = _NormalizeGrabTag ([string]$r.tag_name)
+                $result.YtDlpLatest = $latest
+                if ((_CompareSemver $latest $result.YtDlpCurrent) -gt 0) {
+                    $result.YtDlpNewer = $true
+                    Log-Info "auto-update: yt-dlp $latest available (installed $($result.YtDlpCurrent))"
+                }
+            }
+        }
+    } catch { Log-Warn "auto-update yt-dlp check failed: $($_.Exception.Message)" }
+
+    # ---- gallery-dl ------------------------------------------------------
+    try {
+        $result.GalleryDlCurrent = _ToolInstalledVersion 'gallery-dl'
+        if ($result.GalleryDlCurrent) {
+            $r = & $fetch $script:GalleryDlReleasesLatest
+            if ($r -and $r.tag_name) {
+                $latest = _NormalizeGrabTag ([string]$r.tag_name)
+                $result.GalleryDlLatest = $latest
+                if ((_CompareSemver $latest $result.GalleryDlCurrent) -gt 0) {
+                    $result.GalleryDlNewer = $true
+                    Log-Info "auto-update: gallery-dl $latest available (installed $($result.GalleryDlCurrent))"
+                }
+            }
+        }
+    } catch { Log-Warn "auto-update gallery-dl check failed: $($_.Exception.Message)" }
+
+    # Stamp the last-check timestamp regardless of individual repo outcome
+    # so a persistent GitHub outage doesn't turn Check-ForUpdates into a hot
+    # loop. Test hook: skip the persist when Fetcher is supplied so tests
+    # don't pollute config state.
+    if (-not $Fetcher) {
+        try {
+            $now = [datetime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            Update-Config @{ lastGrabUpdateCheck = $now; lastToolUpdateCheck = $now } | Out-Null
+        } catch { Log-Warn "auto-update: failed to persist lastGrabUpdateCheck: $($_.Exception.Message)" }
+    }
+    return $result
 }
 
 # ---------- URL utilities -------------------------------------------------

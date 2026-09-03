@@ -124,6 +124,7 @@ function Load-SettingsWindow {
                      'DownloadFolder','BrowseBtn','AskBeforeEach',
                      'ConcurrencySlider','ConcurrencyLabel',
                      'CookieBrowser','VideoQuality','ToastsEnabled','ClipboardWatch','Autostart',
+                     'AutoUpdateCheck',
                      'SensitiveByDefault','SensitiveSites',
                      'SensitiveTestUrl','SensitiveTestBtn','SensitiveTestResult',
                      'CrtScanlines','ScanlinesOverlay',
@@ -264,6 +265,10 @@ function Load-SettingsWindow {
                 toastsEnabled      = [bool]$CtlLocal.ToastsEnabled.IsChecked
                 clipboardWatch     = [bool]$CtlLocal.ClipboardWatch.IsChecked
                 autostart          = [bool]$CtlLocal.Autostart.IsChecked
+                # Phase 5: null-guard in case the XAML lookup returned $null
+                # (very old builds without the AutoUpdateCheck control) --
+                # default $true matches Get-Config's back-fill.
+                autoUpdateCheck    = if ($CtlLocal.AutoUpdateCheck) { [bool]$CtlLocal.AutoUpdateCheck.IsChecked } else { $true }
                 sensitiveByDefault = [bool]$CtlLocal.SensitiveByDefault.IsChecked
                 sensitiveSites     = $sitePatterns
                 crtScanlines       = [bool]$CtlLocal.CrtScanlines.IsChecked
@@ -332,6 +337,7 @@ function Load-SettingsWindow {
             $CtlLocal.ToastsEnabled.IsChecked  = $true
             $CtlLocal.ClipboardWatch.IsChecked = $false
             $CtlLocal.Autostart.IsChecked      = $true
+            if ($CtlLocal.AutoUpdateCheck) { $CtlLocal.AutoUpdateCheck.IsChecked = $true }
             $CtlLocal.SensitiveByDefault.IsChecked = $false
             $CtlLocal.SensitiveSites.Text = ''
             $CtlLocal.CrtScanlines.IsChecked = $true
@@ -388,6 +394,9 @@ function Show-Settings {
         $ctl.ToastsEnabled.IsChecked  = [bool]$cfg.toastsEnabled
         $ctl.ClipboardWatch.IsChecked = [bool]$cfg.clipboardWatch
         $ctl.Autostart.IsChecked      = [bool]$cfg.autostart
+        # Phase 5: auto-update daily-check toggle. Back-filled to $true in
+        # Get-Config so an existing config without the key opts in silently.
+        if ($ctl.AutoUpdateCheck) { $ctl.AutoUpdateCheck.IsChecked = [bool]$cfg.autoUpdateCheck }
         $ctl.SensitiveByDefault.IsChecked = [bool]$cfg.sensitiveByDefault
         # CRT scanlines: default $true (see Get-Config back-fill).
         $ctl.CrtScanlines.IsChecked   = [bool]$cfg.crtScanlines

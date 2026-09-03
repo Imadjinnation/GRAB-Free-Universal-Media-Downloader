@@ -54,6 +54,7 @@ Run `.\uninstall.ps1` from the repo:
 .\uninstall.ps1               # interactive (prompts before removing state / pip packages)
 .\uninstall.ps1 -Yes          # remove everything, no prompts
 .\uninstall.ps1 -KeepState    # only remove shortcuts + tray; keep %APPDATA%\grab-app
+.\uninstall.ps1 -NoPackages   # skip the pip / BurntToast step (leave shared tools alone)
 .\uninstall.ps1 -RevertPSGallery   # also flips PSGallery back to Untrusted
 ```
 
@@ -66,6 +67,31 @@ Manual removal (if the script is missing or you need to clean up a broken instal
 3. Delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\grab.lnk` if present.
 4. Registry: remove `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GRAB` and `HKCU\Software\Microsoft\Windows\CurrentVersion\NotifyIconSettings\{f3e2c9a1-4b8e-4d3a-9c1b-5e6a7b8c9d0e}`.
 5. Delete `%APPDATA%\grab-app\` (settings, queue, recent history, logs, `.runtime-theme.xaml`, `done-archive-*.txt`, `config.json.corrupt-*` backups).
+
+## Downgrading
+
+If v0.3.0 breaks something for you, downgrade to v0.2.2:
+
+**Option 1 -- Winget**:
+
+```powershell
+winget install imadjinnation.grab --version 0.2.2
+```
+
+**Option 2 -- Manual**:
+
+1. Right-click the tray icon and pick **Quit**.
+2. Download `GRAB-Setup-v0.2.2.exe` from the [v0.2.2 release page](https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/tag/grab-v0.2.2).
+3. Run the installer -- it detects the newer version and offers to downgrade.
+4. Your config, queue, recent history, and downloads are preserved (they live at `%APPDATA%\grab-app\` and outside the repo, so a version rollback never touches them).
+
+**Report the issue** at [GitHub Issues](https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/issues/new) so we can fix it in v0.3.1.
+
+## Updates
+
+grab checks for new releases via the GitHub Releases API **once every 24 hours** while the tray is running. When a newer version of grab is available a Windows toast fires; clicking the toast opens the Releases page. Dependency updates (yt-dlp / gallery-dl) log a note but never auto-download in v0.3.0 (installer plumbing is planned for v0.3.5+).
+
+Turn the daily poll off under **Settings -> Updates -> Check daily for new grab / yt-dlp / gallery-dl versions**. ffmpeg is intentionally excluded from the check (winget handles it during `install.ps1`).
 
 ## What lives where
 

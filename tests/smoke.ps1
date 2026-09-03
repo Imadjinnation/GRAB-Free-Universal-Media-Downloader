@@ -3779,6 +3779,462 @@ Test 'PowerShell Rotate math is at 500 (pass2 finding 51)' {
     Assert-Match $c 'LogRotateCheck\s*\+\s*1\s*\)\s*%\s*500'
 }
 
+# =========================================================================
+# v0.3.0 Phase 5: auto-update daily check, existing-user migration prompt,
+# automated uninstall completeness test, README Downgrading section.
+# =========================================================================
+Section 'v0.3.0 Phase 5'
+
+# --- Auto-update daily check (Check-ForUpdates) --------------------------
+Test 'Check-ForUpdates exists as a public function (Phase 5)' {
+    Assert-NotNull (Get-Command Check-ForUpdates -ErrorAction SilentlyContinue)
+}
+
+Test 'Get-Config back-fills autoUpdateCheck default true (Phase 5)' {
+    # Fresh isolated data so the back-fill actually runs (not the cache).
+    $iso = Join-Path $env:TEMP ("grab-p5-cfg-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        # Wipe cache so Get-Config re-reads.
+        $script:ConfigCache = $null
+        $script:ConfigCacheMtime = $null
+        $c = Get-Config
+        Assert-True ($c.PSObject.Properties.Name -icontains 'autoUpdateCheck') 'autoUpdateCheck must be back-filled'
+        Assert-Equal $true ([bool]$c.autoUpdateCheck)
+        Assert-True ($c.PSObject.Properties.Name -icontains 'lastGrabUpdateCheck') 'lastGrabUpdateCheck must exist'
+        Assert-True ($c.PSObject.Properties.Name -icontains 'migrationV030PromptShown') 'migrationV030PromptShown must exist'
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Check-ForUpdates parses GitHub Releases API response correctly (Phase 5)' {
+    # Fake a "newer version" release response and drive Check-ForUpdates
+    # through its $Fetcher hook so no real HTTP call happens.
+    $iso = Join-Path $env:TEMP ("grab-p5-fetch-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        Get-Config | Out-Null   # seed
+        $fake = {
+            param($u)
+            # Return a "much newer" release regardless of which URL we're
+            # queried for; the tag_name shape mirrors the real API.
+            return [pscustomobject]@{
+                tag_name  = 'grab-v99.99.0'
+                html_url  = 'https://example.test/release'
+            }
+        }
+        $r = Check-ForUpdates -Force -Fetcher $fake
+        Assert-True (-not $r.Skipped) 'Force must bypass throttle'
+        Assert-Equal '99.99.0' $r.GrabLatest
+        Assert-Equal $true $r.GrabNewer
+        Assert-Equal 'https://example.test/release' $r.GrabUrl
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Check-ForUpdates flags current version as not-newer (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-cur-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        Get-Config | Out-Null
+        # Return the CURRENT version -> should NOT flag GrabNewer.
+        $cur = Get-GrabVersion
+        $fake = { param($u) [pscustomobject]@{ tag_name = "grab-v$cur"; html_url = 'https://example.test/x' } }
+        $r = Check-ForUpdates -Force -Fetcher $fake
+        Assert-Equal $false $r.GrabNewer
+        Assert-Equal $cur $r.GrabLatest
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Check-ForUpdates skips when lastCheck was <24h ago (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-thr-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c = Get-Config
+        # Set last check to 1h ago -- inside the 24h window.
+        $c.lastGrabUpdateCheck = ([datetime]::UtcNow.AddHours(-1)).ToString(
+            'o', [Globalization.CultureInfo]::InvariantCulture)
+        Set-Config $c
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $fake = { param($u) [pscustomobject]@{ tag_name = 'grab-v99.99.0'; html_url = 'x' } }
+        $r = Check-ForUpdates -Fetcher $fake
+        Assert-True ($r.Skipped) 'must skip when last check was <24h ago'
+        Assert-Match $r.Reason '^throttled'
+        Assert-Equal $false $r.GrabNewer
+        # Force flag must override the throttle.
+        $r2 = Check-ForUpdates -Force -Fetcher $fake
+        Assert-True (-not $r2.Skipped) '-Force must bypass throttle'
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Check-ForUpdates handles 404 gracefully (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-404-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        Get-Config | Out-Null
+        # 404 -> Invoke-GitHubLatest returns $null. Emulate the same.
+        $fake = { param($u) return $null }
+        $r = Check-ForUpdates -Force -Fetcher $fake
+        Assert-True (-not $r.Skipped) 'a 404 must not skip the whole check'
+        Assert-Equal $null $r.GrabLatest
+        Assert-Equal $false $r.GrabNewer
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Check-ForUpdates handles rate limit (403) gracefully (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-403-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        Get-Config | Out-Null
+        # A 403 in Invoke-GitHubLatest surfaces the same shape as a 404 --
+        # the try/catch swallows the WebException and returns $null. Prove
+        # the higher-level Check-ForUpdates still returns cleanly.
+        $fake = { param($u) throw [System.Net.WebException]::new('rate limit') }
+        $r = Check-ForUpdates -Force -Fetcher $fake
+        # The fake throws inside the fetch scriptblock; Check-ForUpdates
+        # wraps each repo in try/catch so the exception is swallowed.
+        Assert-True (-not $r.Skipped)
+        Assert-Equal $null $r.GrabLatest
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Check-ForUpdates skips when autoUpdateCheck=false (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-off-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c = Get-Config
+        $c.autoUpdateCheck = $false
+        Set-Config $c
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $fake = { param($u) [pscustomobject]@{ tag_name = 'grab-v99.0.0'; html_url = 'x' } }
+        $r = Check-ForUpdates -Fetcher $fake
+        Assert-True ($r.Skipped)
+        Assert-Equal 'disabled-in-config' $r.Reason
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test '_NormalizeGrabTag strips grab-v and v prefixes (Phase 5)' {
+    Assert-Equal '0.3.0' (_NormalizeGrabTag 'grab-v0.3.0')
+    Assert-Equal '0.3.0' (_NormalizeGrabTag 'v0.3.0')
+    Assert-Equal '0.3.0' (_NormalizeGrabTag '0.3.0')
+    Assert-Equal ''      (_NormalizeGrabTag '')
+}
+
+Test '_CompareSemver orders versions correctly (Phase 5)' {
+    if ((_CompareSemver '0.4.0' '0.3.0') -le 0) { throw '0.4.0 must be > 0.3.0' }
+    if ((_CompareSemver '0.3.0' '0.3.0') -ne 0) { throw '0.3.0 must equal 0.3.0' }
+    if ((_CompareSemver '0.3.0' '0.4.0') -ge 0) { throw '0.3.0 must be < 0.4.0' }
+    # Empty/absent handling
+    if ((_CompareSemver '' '0.3.0') -ge 0) { throw 'empty must be < any real version' }
+}
+
+# --- Auto-update UI wiring -----------------------------------------------
+Test 'settings.xaml has AutoUpdateCheck checkbox in an UPDATES section (Phase 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'ui\settings.xaml') -Raw
+    Assert-Match $c 'Text="UPDATES"'
+    Assert-Match $c 'x:Name="AutoUpdateCheck"'
+    Assert-Match $c 'AutoUpdateCheck[\s\S]{0,200}AutomationProperties\.Name'
+}
+
+Test 'settings.ps1 binds AutoUpdateCheck to config.autoUpdateCheck (Phase 5)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    # Single-quoted so the literal '$cfg' survives the PS parser and lands
+    # in the regex verbatim. Match the read-side bind + the save-side write.
+    Assert-Match $c 'AutoUpdateCheck.*IsChecked\s*=\s*\[bool\]\$cfg\.autoUpdateCheck'
+    Assert-Match $c 'autoUpdateCheck\s*='
+}
+
+Test 'settings.ps1 controls array includes AutoUpdateCheck (Phase 5)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch "'AutoUpdateCheck'") {
+        throw "settings.ps1 FindName loop must include 'AutoUpdateCheck'"
+    }
+}
+
+Test 'tray.ps1 wires Invoke-UpdateCheckAndNotify + UpdateTimer (Phase 5)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    Assert-Match $c 'function\s+Invoke-UpdateCheckAndNotify'
+    Assert-Match $c 'UpdateTimer'
+    if ($c -notmatch 'Check-ForUpdates') { throw 'tray must call Check-ForUpdates' }
+}
+
+Test 'tray.ps1 BalloonTipClicked dispatches to BalloonNextAction first (Phase 5)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'BalloonNextAction') {
+        throw 'tray.ps1 must define $script:BalloonNextAction to route auto-update / migration balloon clicks'
+    }
+    if ($c -notmatch 'add_BalloonTipClicked[\s\S]{0,600}BalloonNextAction') {
+        throw 'BalloonTipClicked handler must inspect $script:BalloonNextAction before falling back to popup-paste'
+    }
+    if ($c -notmatch 'add_BalloonTipClosed') {
+        throw 'tray.ps1 must hook BalloonTipClosed to clear a stale pending action'
+    }
+}
+
+Test 'tray.ps1 UpdateTimer is stopped in Stop-Timers (Phase 5)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Stop-Timers[\s\S]{0,600}UpdateTimer\.Stop') {
+        throw 'Stop-Timers must stop $script:UpdateTimer so a tray restart does not leak the timer'
+    }
+}
+
+# --- Existing-user migration prompt --------------------------------------
+Test 'Test-IsOneDriveFragileDownloadFolder detects the pre-v0.1.1 default (Phase 5)' {
+    Assert-Equal $true  (Test-IsOneDriveFragileDownloadFolder 'C:\Users\admin\Downloads\imadjinn-grab')
+    Assert-Equal $true  (Test-IsOneDriveFragileDownloadFolder 'C:/Users/admin/Downloads/imadjinn-grab')
+    Assert-Equal $false (Test-IsOneDriveFragileDownloadFolder 'D:\imadjinn-grab')
+    Assert-Equal $false (Test-IsOneDriveFragileDownloadFolder 'C:\Users\admin\imadjinn-grab')
+    Assert-Equal $false (Test-IsOneDriveFragileDownloadFolder '')
+}
+
+Test 'existing v0.2.x config with old downloadFolder triggers migration prompt exactly once (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-migr-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c = Get-Config
+        # Simulate an upgraded v0.2.x install: fragile folder + prompt-not-shown.
+        $c.downloadFolder = 'C:\Users\test\Downloads\imadjinn-grab'
+        $c.migrationV030PromptShown = $false
+        Set-Config $c
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        # First call: should trip the migration path AND stamp the flag.
+        Invoke-MigrationPromptIfNeeded
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c2 = Get-Config
+        Assert-Equal $true ([bool]$c2.migrationV030PromptShown) 'flag must be set after first prompt'
+        # Second call: must not re-prompt. We can only prove it via the
+        # flag staying true and no exception -- the balloon side effect
+        # is null when $script:Tray is not set (tests never build a tray).
+        Invoke-MigrationPromptIfNeeded
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c3 = Get-Config
+        Assert-Equal $true ([bool]$c3.migrationV030PromptShown) 'flag stays set on second call'
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'migration prompt skips when downloadFolder is not the fragile default (Phase 5)' {
+    $iso = Join-Path $env:TEMP ("grab-p5-nomigr-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $prev = $env:GRAB_APP_DATA_OVERRIDE
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    try {
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c = Get-Config
+        $c.downloadFolder = 'D:\imadjinn-grab'   # good default
+        $c.migrationV030PromptShown = $false
+        Set-Config $c
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        Invoke-MigrationPromptIfNeeded
+        # The helper still stamps the flag (so a later folder-move into
+        # the fragile path doesn't retro-nag) but never surfaces a balloon.
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        $c2 = Get-Config
+        Assert-Equal $true ([bool]$c2.migrationV030PromptShown)
+    } finally {
+        if (Test-Path $iso) { Remove-Item $iso -Recurse -Force -ErrorAction SilentlyContinue }
+        $env:GRAB_APP_DATA_OVERRIDE = $prev
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+    }
+}
+
+Test 'Start-Tray calls Invoke-MigrationPromptIfNeeded after self-heal (Phase 5)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'Invoke-SelfHealSweep[\s\S]{0,1500}Invoke-MigrationPromptIfNeeded') {
+        throw 'Start-Tray must call Invoke-MigrationPromptIfNeeded AFTER Invoke-SelfHealSweep'
+    }
+}
+
+# --- Automated uninstall completeness test -------------------------------
+Test 'uninstall.ps1 -Yes leaves NO grab-related state on the system (Phase 5)' {
+    # Simulate a full install into isolated locations (env-var-overridden
+    # everywhere), then drive uninstall.ps1 -Yes -NoPackages and prove
+    # the machine is clean.
+    $sandbox      = Join-Path $env:TEMP ("grab-p5-uninst-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $sandboxData  = Join-Path $sandbox 'appdata'
+    $sandboxDesk  = Join-Path $sandbox 'Desktop'
+    $sandboxStart = Join-Path $sandbox 'Startup'
+    New-Item -ItemType Directory -Path $sandboxData  -Force | Out-Null
+    New-Item -ItemType Directory -Path $sandboxDesk  -Force | Out-Null
+    New-Item -ItemType Directory -Path $sandboxStart -Force | Out-Null
+    # Throwaway HKCU subkey for the Run entry.
+    $fakeRunKey = 'HKCU:\Software\grab-app-tests\p5-uninstall-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '\Run'
+    New-Item -Path $fakeRunKey -Force | Out-Null
+
+    # Capture and set env
+    $prev = @{
+        AppData = $env:GRAB_APP_DATA_OVERRIDE
+        Desk    = $env:GRAB_DESKTOP_OVERRIDE
+        Start   = $env:GRAB_STARTUP_OVERRIDE
+        RunKey  = $env:GRAB_RUN_KEY_OVERRIDE
+    }
+    $env:GRAB_APP_DATA_OVERRIDE = $sandboxData
+    $env:GRAB_DESKTOP_OVERRIDE  = $sandboxDesk
+    $env:GRAB_STARTUP_OVERRIDE  = $sandboxStart
+    $env:GRAB_RUN_KEY_OVERRIDE  = $fakeRunKey
+
+    try {
+        # 1. Simulate install: state files + shortcuts + Run entry + notify key.
+        # Write files DIRECTLY into the sandbox rather than via Get-Config --
+        # Get-Config caches $script:AppData at dot-source time so it still
+        # points at $testAppData in this test scope. The uninstall child
+        # process reads GRAB_APP_DATA_OVERRIDE fresh, so it targets sandboxData.
+        Set-Content -Path (Join-Path $sandboxData 'config.json') -Value '{"version":"0.3.0"}' -Encoding UTF8
+        New-Item -ItemType Directory -Path (Join-Path $sandboxData 'logs') -Force | Out-Null
+        Set-Content -Path (Join-Path $sandboxData 'queue.json')  -Value '[]' -Encoding UTF8
+        Set-Content -Path (Join-Path $sandboxData 'recent.json') -Value '[]' -Encoding UTF8
+        Set-Content -Path (Join-Path $sandboxData 'done-archive-yt-dlp.txt') -Value '' -Encoding UTF8
+        Set-Content -Path (Join-Path $sandboxData 'done-archive-gallery-dl.txt') -Value '' -Encoding UTF8
+        Set-Content -Path (Join-Path $sandboxData '.runtime-theme.xaml') -Value '<x/>' -Encoding UTF8
+        Set-Content -Path (Join-Path $sandboxData 'config.json.corrupt-19700101-000000') -Value '{}' -Encoding UTF8
+        # HKCU\Run\GRAB -- write directly into the throwaway subkey so we
+        # don't rely on Set-AutostartRegistry reading a stale env cache.
+        Set-ItemProperty -Path $fakeRunKey -Name 'GRAB' -Value 'wscript.exe "sandbox"' -Force
+        # NotifyIconSettings promotion key
+        $guid = '{f3e2c9a1-4b8e-4d3a-9c1b-5e6a7b8c9d0e}'
+        $notifyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\NotifyIconSettings\$guid"
+        if (-not (Test-Path $notifyKey)) { New-Item -Path $notifyKey -Force | Out-Null }
+        New-ItemProperty -Path $notifyKey -Name 'IsPromoted' -Value 1 -PropertyType DWORD -Force | Out-Null
+        # Test-Desktop + Test-Startup shortcuts (dummy .lnk files)
+        $deskLnk  = Join-Path $sandboxDesk  'grab.lnk'
+        $startLnk = Join-Path $sandboxStart 'grab.lnk'
+        Set-Content -Path $deskLnk  -Value 'fake shortcut' -Encoding UTF8
+        Set-Content -Path $startLnk -Value 'fake shortcut' -Encoding UTF8
+
+        # 2. Sanity check: everything is where we expect it.
+        Assert-PathExists (Join-Path $sandboxData 'config.json')
+        Assert-PathExists $deskLnk
+        Assert-PathExists $startLnk
+        $ok = (Get-ItemProperty -Path $fakeRunKey -Name 'GRAB' -ErrorAction SilentlyContinue) -ne $null
+        Assert-True $ok 'HKCU\Run\GRAB entry must exist before uninstall'
+        Assert-True (Test-Path $notifyKey) 'NotifyIconSettings key must exist'
+
+        # 3. Run uninstall.ps1 -Yes -NoPackages in a child PowerShell so
+        #    it re-reads env-var-driven overrides fresh. Piping "y`n"*3
+        #    to stdin is not needed with -Yes -NoPackages: neither the
+        #    app-data prompt nor the pip prompt fires.
+        $psExe = (Get-Process -Id $PID).Path
+        $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'uninstall.ps1') -Yes -NoPackages 2>&1 | Out-String
+
+        # 4. Assert: sandbox is clean.
+        Assert-True (-not (Test-Path -LiteralPath $sandboxData))                              "AppData folder must be gone (still at $sandboxData). Output:`n$out"
+        Assert-True (-not (Test-Path -LiteralPath $deskLnk))                                  "Desktop grab.lnk must be gone. Output:`n$out"
+        Assert-True (-not (Test-Path -LiteralPath $startLnk))                                 "Startup grab.lnk must be gone. Output:`n$out"
+        $stillHasRun = (Get-ItemProperty -Path $fakeRunKey -Name 'GRAB' -ErrorAction SilentlyContinue)
+        Assert-True ($null -eq $stillHasRun)                                                  "HKCU\Run\GRAB must be gone. Output:`n$out"
+        Assert-True (-not (Test-Path $notifyKey))                                             "NotifyIconSettings key must be gone. Output:`n$out"
+    } finally {
+        # Cleanup env
+        if ($prev.AppData) { $env:GRAB_APP_DATA_OVERRIDE = $prev.AppData } else { Remove-Item Env:GRAB_APP_DATA_OVERRIDE -ErrorAction SilentlyContinue }
+        if ($prev.Desk)    { $env:GRAB_DESKTOP_OVERRIDE  = $prev.Desk }    else { Remove-Item Env:GRAB_DESKTOP_OVERRIDE  -ErrorAction SilentlyContinue }
+        if ($prev.Start)   { $env:GRAB_STARTUP_OVERRIDE  = $prev.Start }   else { Remove-Item Env:GRAB_STARTUP_OVERRIDE  -ErrorAction SilentlyContinue }
+        if ($prev.RunKey)  { $env:GRAB_RUN_KEY_OVERRIDE  = $prev.RunKey }  else { Remove-Item Env:GRAB_RUN_KEY_OVERRIDE  -ErrorAction SilentlyContinue }
+        # Restore harness's AppData override
+        $env:GRAB_APP_DATA_OVERRIDE = $testAppData
+        $script:ConfigCache = $null; $script:ConfigCacheMtime = $null
+        if (Test-Path $sandbox) { Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
+        # Clean the fake registry subtree in case the child left crumbs.
+        try {
+            $parent = Split-Path $fakeRunKey -Parent
+            if (Test-Path $parent) { Remove-Item $parent -Recurse -Force -ErrorAction SilentlyContinue }
+            $tests = 'HKCU:\Software\grab-app-tests'
+            if ((Test-Path $tests) -and (-not @(Get-ChildItem $tests -ErrorAction SilentlyContinue))) {
+                Remove-Item $tests -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
+    }
+}
+
+Test 'uninstall.ps1 accepts -NoPackages switch (Phase 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'uninstall.ps1') -Raw
+    Assert-Match $c '\[switch\]\$NoPackages'
+    Assert-Match $c 'pip packages step skipped \(-NoPackages\)'
+}
+
+Test 'uninstall.ps1 honors GRAB_APP_DATA_OVERRIDE + GRAB_DESKTOP_OVERRIDE + GRAB_RUN_KEY_OVERRIDE (Phase 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'uninstall.ps1') -Raw
+    Assert-Match $c 'GRAB_APP_DATA_OVERRIDE'
+    Assert-Match $c 'GRAB_DESKTOP_OVERRIDE'
+    Assert-Match $c 'GRAB_RUN_KEY_OVERRIDE'
+    Assert-Match $c 'GRAB_STARTUP_OVERRIDE'
+}
+
+# --- README documentation (Downgrading + Updates sections) ---------------
+Test 'README documents Downgrading (Phase 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '(?m)^## Downgrading\b'
+    Assert-Match $c 'winget install imadjinnation\.grab --version 0\.2\.2'
+    Assert-Match $c 'GRAB-Setup-v0\.2\.2'
+    Assert-Match $c 'issues/new'
+}
+
+Test 'README documents daily update check + how to turn it off (Phase 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '(?m)^## Updates\b'
+    Assert-Match $c 'once every 24'
+    Assert-Match $c 'ffmpeg is intentionally excluded'
+    Assert-Match $c 'Settings\s*->\s*Updates'
+}
+
+Test 'CHANGELOG mentions Phase 5 auto-update / migration / uninstall test (Phase 5)' {
+    $c = Get-Content (Join-Path $repoRoot 'CHANGELOG.md') -Raw
+    Assert-Match $c 'Phase 5'
+    Assert-Match $c 'Check-ForUpdates'
+    Assert-Match $c 'migrationV030PromptShown'
+    Assert-Match $c 'automated uninstall'
+}
+
+Test 'config-reference.md lists autoUpdateCheck + migrationV030PromptShown (Phase 5)' {
+    $c = Get-Content (Join-Path $docsRoot 'config-reference.md') -Raw
+    Assert-Match $c 'autoUpdateCheck'
+    Assert-Match $c 'lastGrabUpdateCheck'
+    Assert-Match $c 'migrationV030PromptShown'
+    Assert-Match $c 'GRAB_DESKTOP_OVERRIDE'
+}
+
 # --- test count baseline / self-check ------------------------------------
 Test 'test count exceeds pass2 baseline (400+)' {
     # Just prove we're above the phase-4 baseline of 342. Actual count is
@@ -3786,6 +4242,14 @@ Test 'test count exceeds pass2 baseline (400+)' {
     # test removal.
     if ($script:PassCount -lt 340) {
         throw "smoke test count regressed: only $($script:PassCount) passing so far (was 342 baseline)"
+    }
+}
+
+Test 'test count exceeds Phase 5 baseline (420+)' {
+    # Phase 5 added ~25 new tests on top of the 402 Phase 4.5 baseline.
+    # Anything under 420 means a test got silently dropped.
+    if ($script:PassCount -lt 420) {
+        throw "smoke test count regressed: only $($script:PassCount) passing (was 402 at Phase 4.5, target 425+)"
     }
 }
 
