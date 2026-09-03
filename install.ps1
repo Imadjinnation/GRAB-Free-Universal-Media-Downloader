@@ -4,8 +4,16 @@
 
 [CmdletBinding()]
 param(
-    [switch]$NoStartup,   # skip adding to Windows startup
-    [switch]$Quiet        # minimal output
+    [switch]$NoStartup,        # skip adding to Windows startup
+    [switch]$Quiet,            # minimal output
+    # Phase 5.5: force the legacy Python + pip install path even when
+    # bundled binaries under assets/bin/ are present. Used by dev users
+    # who prefer to keep yt-dlp / gallery-dl on their own pip schedule,
+    # or by CI that already manages Python. Default behavior:
+    #   - if assets/bin/yt-dlp.exe exists -> assume this repo was
+    #     dropped by the installer / portable zip; skip pip entirely.
+    #   - else -> run the classic Python + pip flow (below).
+    [switch]$UseSystemPython
 )
 
 $ErrorActionPreference = 'Continue'
@@ -50,7 +58,34 @@ try {
     exit 1
 }
 
+# --- Phase 5.5: bundled-binaries fast path --------------------------------
+# When the repo ships with assets/bin/yt-dlp.exe alongside gallery-dl.exe
+# (a Portable-zip extract, or the Inno Setup installer copy), the pip
+# install step is redundant and would confuse Resolve-Tool by installing
+# a second copy on a different update schedule. Skip Python entirely
+# unless the user opted in with -UseSystemPython.
+$script:BundledBin  = Join-Path $script:Root 'assets\bin'
+$script:HasBundled  = $false
+if (-not $UseSystemPython -and (Test-Path -LiteralPath (Join-Path $script:BundledBin 'yt-dlp.exe'))) {
+    $script:HasBundled = $true
+    Section 'Bundled binaries'
+    foreach ($tool in @('yt-dlp.exe','gallery-dl.exe','ffmpeg.exe')) {
+        $p = Join-Path $script:BundledBin $tool
+        if (Test-Path -LiteralPath $p) { Ok "$tool present at $p" } else { Warn "$tool NOT bundled at $p" }
+    }
+    Say 'Skipping Python + pip -- assets/bin/ has what we need.'
+    Say '(Pass -UseSystemPython to force the legacy pip flow.)'
+}
+
 # --- Python check ---------------------------------------------------------
+# Skipped when bundled binaries are present (see above).
+if ($script:HasBundled) {
+    Section 'Python'
+    Ok 'skipped (bundled binaries in use)'
+    # Set a null scripts dir so downstream PATH-append logic is a no-op.
+    $scriptsDir = $null
+    $pyExe = $null
+} else {
 Section 'Python'
 $pyExe = $null
 foreach ($cmd in @('python','py','python3')) {
@@ -115,6 +150,7 @@ if ($userPath -notlike "*$scriptsDir*") {
     Ok "PATH already contains Scripts dir"
 }
 $env:Path = $env:Path.TrimEnd(';') + ';' + $scriptsDir
+}  # end else -- Python/pip/PATH block (skipped when bundled binaries present)
 
 # --- BurntToast (Windows toast notifications) -----------------------------
 Section 'Toast notifications (BurntToast)'
@@ -144,19 +180,28 @@ if (-not $btInstalled) {
 }
 
 # --- ffmpeg check ---------------------------------------------------------
+# Phase 5.5: prefer the bundled ffmpeg under assets/bin/ when present
+# (portable / installer builds ship it there). Fall back to PATH lookup,
+# then winget install of Gyan.FFmpeg. install.ps1 never touches shared
+# ffmpeg on machines that have their own via winget or scoop.
 Section 'ffmpeg'
-$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
-if ($ffmpeg) {
-    Ok "ffmpeg present ($($ffmpeg.Source))"
+$bundledFfmpeg = Join-Path $script:BundledBin 'ffmpeg.exe'
+if (Test-Path -LiteralPath $bundledFfmpeg) {
+    Ok "ffmpeg bundled at $bundledFfmpeg"
 } else {
-    Say 'ffmpeg not found; attempting winget install ...'
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget) {
-        $out = winget install --exact --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements --silent 2>&1
-        if ($LASTEXITCODE -eq 0) { Ok 'ffmpeg installed via winget' }
-        else { Warn "winget ffmpeg install failed; download manually from https://ffmpeg.org/download.html" }
+    $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    if ($ffmpeg) {
+        Ok "ffmpeg present ($($ffmpeg.Source))"
     } else {
-        Warn 'winget not available; install ffmpeg manually from https://ffmpeg.org/download.html'
+        Say 'ffmpeg not found; attempting winget install ...'
+        $winget = Get-Command winget -ErrorAction SilentlyContinue
+        if ($winget) {
+            $out = winget install --exact --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements --silent 2>&1
+            if ($LASTEXITCODE -eq 0) { Ok 'ffmpeg installed via winget' }
+            else { Warn "winget ffmpeg install failed; download manually from https://ffmpeg.org/download.html" }
+        } else {
+            Warn 'winget not available; install ffmpeg manually from https://ffmpeg.org/download.html'
+        }
     }
 }
 

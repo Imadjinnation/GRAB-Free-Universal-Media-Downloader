@@ -2,7 +2,20 @@
 
 All notable changes to grab. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - 2026-09 - Hygiene Pass (Phase 4.5 second-audit corrections + Phase 5 auto-update / migration / uninstall-test)
+## [0.3.0] - 2026-09 - Hygiene Pass (Phase 4.5 second-audit corrections + Phase 5 auto-update / migration / uninstall-test + Phase 5.5 distribution scaffolding)
+
+### Phase 5.5 additions (distribution scaffolding -- NOT YET RELEASED)
+
+- **`build/build-installer.ps1`** -- reproducible build script that downloads yt-dlp nightly (with sha256 verify), gallery-dl latest, and the ffmpeg-release-shared essentials build (extracts only `ffmpeg.exe` + required DLLs; drops `ffplay.exe`, `ffprobe.exe`, docs, includes), copies the GRAB payload, emits `dep-versions.json`, compiles `GRAB-Setup.exe` via Inno Setup, and packages `GRAB-Portable-v0.3.0.zip` alongside a `SHA256SUMS.txt`. Supports `-WhatIf` (dry-run), `-SkipDownload` (reuse `dist/payload/bin/`), `-NoZip`, `-NoInstaller`, and `-OutDir` (tests). Auto-installs 7-Zip and Inno Setup via winget when missing.
+- **`build/GRAB-Setup.iss.template`** -- Inno Setup wizard: per-user install (no UAC), MIT license page, welcome / dir / done wizard steps, optional Desktop shortcut, optional autostart via HKCU\Run\GRAB, optional Windows 11 tray-icon promotion, uninstall hook that runs our own `uninstall.ps1 -Yes -NoPackages` for a full clean sweep.
+- **`build/winget/`** -- three-file microsoft/winget-pkgs manifest set (`Imadjinnation.GRAB.yaml`, `Imadjinnation.GRAB.installer.yaml`, `Imadjinnation.GRAB.locale.en-US.yaml`). Installer manifest points at the GitHub Release asset with SHA256 placeholder for Phase 6 fill-in. Companion `build/winget/README.md` has the exact `gh` commands to fork microsoft/winget-pkgs and open the PR.
+- **`build/scoop/`** -- `grab.json` package manifest with `bin: [[grab-app.vbs, grab]]` so `grab` works after `scoop install`, plus `checkver` + `autoupdate` blocks tied to the `grab-v<semver>` tag convention and `SHA256SUMS.txt`. Companion `build/scoop/README.md` covers bucket setup at `imadjinnation/scoop-bucket`.
+- **Bundled-binaries install mode** -- `install.ps1` detects `assets/bin/yt-dlp.exe` and skips the pip + Python flow entirely (portable / installer builds). New `-UseSystemPython` flag forces the legacy pip flow for developers who prefer to manage Python packages themselves. `Resolve-Tool` in `src/utils.ps1` now checks `assets/bin/` first (before Python scripts dir, before PATH); overridable in tests via `GRAB_BUNDLED_BIN_OVERRIDE`.
+- **README rewrite** -- `## Install` covers all 5 install paths (winget / scoop / .exe / .zip / dev clone). `## On first run, Windows may warn` explains SmartScreen honestly and points at `docs/smartscreen.md`.
+- **`docs/smartscreen.md`** -- full explainer: why we don't sign, how to safely accept the dialog, how to verify SHA256, how to report false positives, per-install-path notes.
+- **`.gitignore`** -- excludes `dist/`, `build/winget/*.yaml.tmp`, `build/scoop/grab-*.json.bak`, and `assets/bin/` (never committed; only present on installed machines).
+
+Deferred to Phase 6: actually running `build-installer.ps1` (consumes ~150MB network per run, bundled dep versions get locked in when the release is cut); uploading the artifacts to a GitHub Release; filling in the winget / scoop sha256 placeholders; opening the microsoft/winget-pkgs PR; creating the `imadjinnation/scoop-bucket` repo.
 
 ### Phase 5 additions
 

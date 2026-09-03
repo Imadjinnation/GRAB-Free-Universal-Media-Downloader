@@ -1,0 +1,123 @@
+; GRAB-Setup.iss.template
+; Inno Setup 6 wizard template for GRAB. Placeholders substituted by
+; build/build-installer.ps1 at build time:
+;   __GRAB_VERSION__   -- e.g. 0.3.0 (from src/utils.ps1 $GrabVersion)
+;   __PAYLOAD_DIR__    -- e.g. C:\...\grab\dist\payload
+;   __OUTPUT_DIR__     -- e.g. C:\...\grab\dist
+;   __ICON_PATH__      -- absolute path to assets/icon.ico under payload
+;
+; Design notes:
+;   - Per-user install by default (PrivilegesRequired=lowest) so no UAC
+;     prompt appears -- matches consumer expectations for downloader apps.
+;     Users can still elect a machine-wide install by re-launching elevated.
+;   - Install location default is %LocalAppData%\Imadjinn\GRAB (per-user).
+;   - MIT license shown on Wizard's second page.
+;   - Post-install:
+;       * Desktop shortcut pointing at grab-app.vbs
+;       * Start Menu shortcut
+;       * HKCU\Run\GRAB (autostart) via the app's own Set-AutostartRegistry
+;         helper (called by grab-app.vbs on first launch via install.ps1
+;         config seeding); the installer only lays down the .vbs entry
+;         point so it can run.
+;   - Uninstall: run uninstall.ps1 -Yes -NoPackages first, then remove dir.
+;   - No signing: SmartScreen warning is expected on first launch.
+
+#define MyAppName "GRAB"
+#define MyAppVersion "__GRAB_VERSION__"
+#define MyAppPublisher "Imadjinn"
+#define MyAppURL "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader"
+#define MyAppExeName "grab-app.vbs"
+
+[Setup]
+AppId={{2F1E5B4C-8A3D-4E9F-BE12-3C7A9D6E4B7F}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}/issues
+AppUpdatesURL={#MyAppURL}/releases
+; Default per-user install path. {userappdata}\..\Local\Imadjinn\GRAB resolves
+; to %LocalAppData%\Imadjinn\GRAB via Inno's constant expansion.
+DefaultDirName={autopf}\Imadjinn\GRAB
+DefaultGroupName={#MyAppName}
+; Per-user by default -- no UAC prompt. If user elevates the installer
+; manually, {autopf} resolves to Program Files instead of Local AppData.
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=commandline dialog
+DisableProgramGroupPage=yes
+DisableWelcomePage=no
+LicenseFile=__PAYLOAD_DIR__\LICENSE
+OutputDir=__OUTPUT_DIR__
+OutputBaseFilename=GRAB-Setup
+SetupIconFile=__ICON_PATH__
+UninstallDisplayIcon={app}\assets\icon.ico
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+; No code signing -- consumers see SmartScreen once; README explains it.
+; VersionInfoDescription surfaces in the SmartScreen dialog "Publisher:" line
+; and Explorer file properties.
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} {#MyAppVersion} -- Free Universal Media Downloader
+VersionInfoProductName={#MyAppName}
+VersionInfoVersion={#MyAppVersion}
+VersionInfoCopyright=(C) 2025-2026 Imadjinn. MIT License.
+; Written to Programs and Features -- consumer-friendly.
+AppReadmeFile={app}\README.md
+UninstallDisplayName={#MyAppName} {#MyAppVersion}
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
+Name: "autostart";   Description: "Start {#MyAppName} at &login (autostart)"; GroupDescription: "Startup:"
+Name: "promotetray"; Description: "Show the tray icon in the &taskbar (Windows 11)"; GroupDescription: "Startup:"
+
+[Files]
+; Root entry points
+Source: "__PAYLOAD_DIR__\grab-app.ps1";   DestDir: "{app}"; Flags: ignoreversion
+Source: "__PAYLOAD_DIR__\grab-app.vbs";   DestDir: "{app}"; Flags: ignoreversion
+Source: "__PAYLOAD_DIR__\uninstall.ps1";  DestDir: "{app}"; Flags: ignoreversion
+Source: "__PAYLOAD_DIR__\README.md";      DestDir: "{app}"; Flags: ignoreversion
+Source: "__PAYLOAD_DIR__\CHANGELOG.md";   DestDir: "{app}"; Flags: ignoreversion
+Source: "__PAYLOAD_DIR__\LICENSE";        DestDir: "{app}"; Flags: ignoreversion
+Source: "__PAYLOAD_DIR__\dep-versions.json"; DestDir: "{app}"; Flags: ignoreversion
+
+; PowerShell modules (src/), UI markup, assets, and docs -- all recursive.
+Source: "__PAYLOAD_DIR__\src\*";    DestDir: "{app}\src";    Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "__PAYLOAD_DIR__\ui\*";     DestDir: "{app}\ui";     Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "__PAYLOAD_DIR__\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "__PAYLOAD_DIR__\docs\*";   DestDir: "{app}\docs";   Flags: ignoreversion recursesubdirs createallsubdirs
+
+; Bundled tool binaries under assets\bin\ (Resolve-Tool in src/utils.ps1
+; checks here before PATH so users don't need Python).
+Source: "__PAYLOAD_DIR__\bin\*"; DestDir: "{app}\assets\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+; Start Menu (always)
+Name: "{group}\{#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\{#MyAppExeName}"""; IconFilename: "{app}\assets\icon.ico"; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName} downloads folder"; Filename: "{app}\assets\icon.ico"; WorkingDir: "{app}"
+Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+
+; Desktop (optional, on by default via Tasks)
+Name: "{autodesktop}\{#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\{#MyAppExeName}"""; IconFilename: "{app}\assets\icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
+
+[Registry]
+; Autostart via HKCU\Run (survives OneDrive folder sync -- see src/utils.ps1
+; Set-AutostartRegistry comment). Optional Task; user can uncheck.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GRAB"; ValueData: "wscript.exe ""{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+
+; Windows 11 tray icon promotion (keep icon in taskbar, not up-caret).
+; Matches install.ps1 behavior; best-effort so a rejected write is ok.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\NotifyIconSettings\{{f3e2c9a1-4b8e-4d3a-9c1b-5e6a7b8c9d0e}"; ValueType: dword; ValueName: "IsPromoted"; ValueData: "1"; Flags: uninsdeletevalue; Tasks: promotetray
+
+[Run]
+; Launch the tray at the end of the wizard (optional).
+Filename: "wscript.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; Run our own uninstall.ps1 first for a full clean sweep (removes HKCU\Run
+; drift, per-engine done-archive files, runtime-theme scratch, etc.).
+; -NoPackages: don't touch shared pip / PS modules; -Yes: silent.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"" -Yes -NoPackages"; Flags: runhidden; RunOnceId: "GrabUninstall"

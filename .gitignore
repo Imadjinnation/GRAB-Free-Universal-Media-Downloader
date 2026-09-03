@@ -10,3 +10,18 @@ Desktop.ini
 # Editor
 .vscode/
 .idea/
+
+# Phase 5.5 build outputs — build-installer.ps1 populates this
+# with ~150MB of downloaded deps + the compiled installer / portable
+# zip. Never commit these; Phase 6 uploads them to a GitHub Release.
+dist/
+
+# Editor / backup files that build helpers may leave in build/ subtrees
+build/winget/*.yaml.tmp
+build/scoop/grab-*.json.bak
+
+# Bundled binaries the installer copies into assets/bin/ at install time
+# so Resolve-Tool can prefer them over PATH. The dev-mode git clone flow
+# does NOT ship these; they only appear on machines installed via the
+# .exe wizard or the portable zip.
+assets/bin/

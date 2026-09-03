@@ -487,13 +487,39 @@ function Get-PythonScriptsDir {
 
 $script:ToolCache = @{}
 
+# Repo-root-relative assets/bin/ directory. Populated by the Phase 5.5
+# installer / portable-zip build (build/build-installer.ps1) and NOT
+# by a plain `git clone` -- see .gitignore. Kept as a script-scoped value
+# so tests can override it via GRAB_BUNDLED_BIN_OVERRIDE without touching
+# the on-disk path.
+function Get-BundledBinDir {
+    if ($env:GRAB_BUNDLED_BIN_OVERRIDE) { return $env:GRAB_BUNDLED_BIN_OVERRIDE }
+    # $PSScriptRoot here is src/, so bin dir is ../assets/bin.
+    return (Join-Path (Split-Path $PSScriptRoot -Parent) 'assets\bin')
+}
+
 function Resolve-Tool([string]$name) {
-    # Prefer the PIP-installed exe over anything else on PATH. WinGet packages
-    # (like yt-dlp.yt-dlp) install their own copy and can win a PATH tie-break,
-    # but they update on their own schedule -- we can't manage them. The pip
-    # copy is the one our install.ps1 keeps on nightly.
+    # Precedence:
+    #   1. Bundled binary at <repo>/assets/bin/<name>.exe -- shipped with
+    #      the Phase 5.5 installer / portable zip. Wins over PATH so users
+    #      never accidentally run a stale pip-installed yt-dlp against the
+    #      wrong yt-dlp-ejs. Managed by our own updater.
+    #   2. Python scripts folder (managed by install.ps1's legacy pip flow).
+    #   3. Whatever is on PATH (winget yt-dlp.yt-dlp etc.).
+    # Cached per process; invalidate by clearing $script:ToolCache in tests.
     if ($script:ToolCache.ContainsKey($name)) { return $script:ToolCache[$name] }
-    # 1. Python scripts folder (managed by install.ps1)
+
+    # 1. Bundled binary (Phase 5.5). Prepend to PATH so children see it first.
+    $bundledDir = Get-BundledBinDir
+    if ($bundledDir -and (Test-Path -LiteralPath $bundledDir)) {
+        $bundled = Join-Path $bundledDir "$name.exe"
+        if (Test-Path -LiteralPath $bundled) {
+            if ($env:Path -notlike "$bundledDir;*") { $env:Path = $bundledDir + ';' + $env:Path }
+            $script:ToolCache[$name] = $bundled
+            return $bundled
+        }
+    }
+    # 2. Python scripts folder (managed by install.ps1's pip flow)
     $scripts = Get-PythonScriptsDir
     if ($scripts) {
         $exe = Join-Path $scripts "$name.exe"
@@ -504,7 +530,7 @@ function Resolve-Tool([string]$name) {
             return $exe
         }
     }
-    # 2. Fallback to whatever is on PATH
+    # 3. Fallback to whatever is on PATH
     $cmd = Get-Command $name -ErrorAction SilentlyContinue
     if ($cmd) { $script:ToolCache[$name] = $cmd.Source; return $cmd.Source }
     return $null

@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+# Default-locale manifest for GRAB v0.3.0. Every string microsoft/winget-pkgs
+# surfaces in `winget show`, the Windows Store fallback, or search results
+# lives here.
+
+PackageIdentifier: Imadjinnation.GRAB
+PackageVersion: 0.3.0
+PackageLocale: en-US
+Publisher: Imadjinn
+PublisherUrl: https://github.com/imadjinnation
+PublisherSupportUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/issues
+PrivacyUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader#privacy
+Author: Imadjinn
+PackageName: GRAB
+PackageUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader
+License: MIT
+LicenseUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/blob/main/LICENSE
+Copyright: (c) 2025-2026 Imadjinn
+CopyrightUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/blob/main/LICENSE
+ShortDescription: Free universal media downloader for Windows -- tray app that wraps yt-dlp + gallery-dl.
+Description: |-
+  GRAB is a calm, always-available system-tray downloader for filmmakers,
+  reference gatherers, and anyone who's tired of manually driving yt-dlp
+  or gallery-dl one URL at a time.
+
+  Paste any link, get the file. GRAB auto-picks the right engine per URL
+  (yt-dlp for video, gallery-dl for image galleries), falls back if the
+  first engine can't handle it, and lays downloads out under
+  <category>/<domain>/... on disk.
+
+  - Works with ~1000 supported sites out of the box
+  - Uses your Chrome / Firefox / Edge cookies for private content
+  - Duplicate-safe (per-engine done-archive)
+  - No telemetry, no ads, no premium tier
+  - MIT-licensed; source at the URL below
+
+  Bundled binaries (updated at build time from official upstream sources):
+    - yt-dlp (nightly channel)
+    - gallery-dl
+    - ffmpeg (shared essentials build)
+
+Moniker: grab
+Tags:
+  - downloader
+  - youtube
+  - video
+  - gallery
+  - media
+  - yt-dlp
+  - gallery-dl
+  - tray
+  - windows
+  - open-source
+ReleaseNotes: |-
+  v0.3.0 -- Hygiene pass, Phase 5.5 distribution.
+
+  See the full CHANGELOG at the URL below.
+ReleaseNotesUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/blob/main/CHANGELOG.md
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

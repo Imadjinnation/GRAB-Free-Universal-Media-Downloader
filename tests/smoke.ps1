@@ -4235,6 +4235,287 @@ Test 'config-reference.md lists autoUpdateCheck + migrationV030PromptShown (Phas
     Assert-Match $c 'GRAB_DESKTOP_OVERRIDE'
 }
 
+# =========================================================================
+# Phase 5.5 -- distribution scaffolding (Inno Setup / winget / scoop /
+# bundled binaries / SmartScreen doc). None of these actually run the
+# build script; they just prove the scaffolding exists and is coherent.
+# =========================================================================
+Section 'Phase 5.5 -- distribution scaffolding'
+
+$buildRoot   = Join-Path $repoRoot 'build'
+$wingetRoot  = Join-Path $buildRoot 'winget'
+$scoopRoot   = Join-Path $buildRoot 'scoop'
+$buildScript = Join-Path $buildRoot 'build-installer.ps1'
+$issTemplate = Join-Path $buildRoot 'GRAB-Setup.iss.template'
+
+Test 'build-installer.ps1 exists' {
+    Assert-PathExists $buildScript
+}
+
+Test 'build-installer.ps1 supports -WhatIf (dry-run)' {
+    # Just prove the script declares [CmdletBinding(SupportsShouldProcess)]
+    # so `-WhatIf` is a legal argument. Actually invoking it triggers
+    # network fetches we don't want in a smoke test.
+    $c = Get-Content $buildScript -Raw
+    Assert-Match $c '\[CmdletBinding\(SupportsShouldProcess'
+    Assert-Match $c '\$WhatIfPreference'
+}
+
+Test 'build-installer.ps1 declares expected artifacts (Setup.exe, Portable.zip, SHA256SUMS.txt)' {
+    $c = Get-Content $buildScript -Raw
+    Assert-Match $c 'GRAB-Setup\.exe'
+    Assert-Match $c 'GRAB-Portable-v'
+    Assert-Match $c 'SHA256SUMS\.txt'
+    Assert-Match $c 'dep-versions\.json'
+}
+
+Test 'build-installer.ps1 downloads yt-dlp nightly + gallery-dl + ffmpeg' {
+    $c = Get-Content $buildScript -Raw
+    Assert-Match $c 'yt-dlp-nightly-builds'
+    Assert-Match $c 'mikf/gallery-dl'
+    Assert-Match $c 'gyan\.dev/ffmpeg/builds/ffmpeg-release-shared'
+}
+
+Test 'build-installer.ps1 discards ffplay / ffprobe / docs from ffmpeg' {
+    $c = Get-Content $buildScript -Raw
+    # Positive: keeps ffmpeg.exe + the required DLL patterns.
+    Assert-Match $c 'ffmpeg\.exe'
+    Assert-Match $c 'avcodec-\*\.dll'
+    Assert-Match $c 'avformat-\*\.dll'
+    Assert-Match $c 'swresample-\*\.dll'
+    # Negative: build script must NOT copy ffplay.exe / ffprobe.exe into bin/.
+    # We assert absence in the `keep` array by looking for the whitelist.
+    Assert-Match $c '(?ms)\$keep\s*=\s*@\('
+    if ($c -match '''ffplay\.exe''') { throw 'build script whitelists ffplay.exe (should be dropped)' }
+    if ($c -match '''ffprobe\.exe''') { throw 'build script whitelists ffprobe.exe (should be dropped)' }
+}
+
+Test 'build-installer.ps1 reads version from src/utils.ps1 (single source of truth)' {
+    $c = Get-Content $buildScript -Raw
+    Assert-Match $c 'Get-GrabRepoVersion'
+    Assert-Match $c 'GrabVersion'
+    Assert-Match $c 'src\\utils\.ps1'
+}
+
+Test 'GRAB-Setup.iss.template exists with placeholders' {
+    Assert-PathExists $issTemplate
+    $c = Get-Content $issTemplate -Raw
+    Assert-Match $c '__GRAB_VERSION__'
+    Assert-Match $c '__PAYLOAD_DIR__'
+    Assert-Match $c '__OUTPUT_DIR__'
+    Assert-Match $c '__ICON_PATH__'
+}
+
+Test 'GRAB-Setup.iss.template is per-user (no UAC)' {
+    $c = Get-Content $issTemplate -Raw
+    Assert-Match $c 'PrivilegesRequired=lowest'
+    Assert-Match $c 'DefaultDirName='
+}
+
+Test 'GRAB-Setup.iss.template creates HKCU\Run\GRAB + tray-promotion + shortcuts' {
+    $c = Get-Content $issTemplate -Raw
+    Assert-Match $c 'CurrentVersion\\Run'
+    Assert-Match $c 'ValueName:\s*"GRAB"'
+    Assert-Match $c 'NotifyIconSettings'
+    Assert-Match $c '\{autodesktop\}'
+    Assert-Match $c '\{group\}'
+}
+
+Test 'GRAB-Setup.iss.template calls our uninstall.ps1 with -Yes -NoPackages' {
+    $c = Get-Content $issTemplate -Raw
+    Assert-Match $c 'uninstall\.ps1.*-Yes.*-NoPackages'
+    # And it targets wscript.exe grab-app.vbs (silent launcher).
+    Assert-Match $c 'wscript\.exe'
+    Assert-Match $c 'grab-app\.vbs'
+}
+
+# --- winget manifest -----------------------------------------------------
+Test 'winget manifest has all 3 required YAML files' {
+    Assert-PathExists (Join-Path $wingetRoot 'Imadjinnation.GRAB.yaml')
+    Assert-PathExists (Join-Path $wingetRoot 'Imadjinnation.GRAB.installer.yaml')
+    Assert-PathExists (Join-Path $wingetRoot 'Imadjinnation.GRAB.locale.en-US.yaml')
+    Assert-PathExists (Join-Path $wingetRoot 'README.md')
+}
+
+Test 'winget version manifest has PackageIdentifier + PackageVersion' {
+    $c = Get-Content (Join-Path $wingetRoot 'Imadjinnation.GRAB.yaml') -Raw
+    Assert-Match $c 'PackageIdentifier:\s*Imadjinnation\.GRAB'
+    Assert-Match $c 'PackageVersion:\s*0\.3\.0'
+    Assert-Match $c 'ManifestType:\s*version'
+}
+
+Test 'winget installer.yaml has correct publisher pattern + URL + sha256 placeholder' {
+    $c = Get-Content (Join-Path $wingetRoot 'Imadjinnation.GRAB.installer.yaml') -Raw
+    Assert-Match $c 'PackageIdentifier:\s*Imadjinnation\.GRAB'
+    Assert-Match $c 'InstallerType:\s*inno'
+    Assert-Match $c 'Scope:\s*user'
+    Assert-Match $c 'InstallerUrl:\s*https://github\.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v0\.3\.0/GRAB-Setup\.exe'
+    Assert-Match $c 'InstallerSha256:\s*__SHA256_PLACEHOLDER__'
+    Assert-Match $c '/VERYSILENT'
+}
+
+Test 'winget locale.en-US.yaml has Publisher / License / Tags / Moniker' {
+    $c = Get-Content (Join-Path $wingetRoot 'Imadjinnation.GRAB.locale.en-US.yaml') -Raw
+    Assert-Match $c 'Publisher:\s*Imadjinn'
+    Assert-Match $c 'License:\s*MIT'
+    Assert-Match $c 'Moniker:\s*grab'
+    # A handful of the required tags from the task brief.
+    Assert-Match $c '(?m)^\s*-\s*downloader'
+    Assert-Match $c '(?m)^\s*-\s*yt-dlp'
+    Assert-Match $c '(?m)^\s*-\s*gallery-dl'
+    Assert-Match $c '(?m)^\s*-\s*windows'
+    Assert-Match $c '(?m)^\s*-\s*tray'
+    Assert-Match $c '(?m)^\s*-\s*open-source'
+}
+
+Test 'winget README documents the fork + PR flow (Phase 6)' {
+    $c = Get-Content (Join-Path $wingetRoot 'README.md') -Raw
+    Assert-Match $c 'gh repo fork microsoft/winget-pkgs'
+    Assert-Match $c 'wingetcreate update'
+    Assert-Match $c 'manifests/i/Imadjinnation/GRAB'
+}
+
+# --- Scoop bucket --------------------------------------------------------
+Test 'scoop grab.json is valid JSON with required keys' {
+    $path = Join-Path $scoopRoot 'grab.json'
+    Assert-PathExists $path
+    $obj = Get-Content $path -Raw | ConvertFrom-Json
+    Assert-NotNull $obj 'grab.json failed to parse as JSON'
+    Assert-Equal '0.3.0' $obj.version 'scoop grab.json version mismatch'
+    Assert-NotNull $obj.description 'grab.json missing description'
+    Assert-NotNull $obj.license      'grab.json missing license'
+    Assert-NotNull $obj.homepage     'grab.json missing homepage'
+    Assert-NotNull $obj.architecture.'64bit'.url  'grab.json missing 64bit.url'
+    Assert-NotNull $obj.architecture.'64bit'.hash 'grab.json missing 64bit.hash'
+    # bin is a nested array: [["grab-app.vbs","grab"]] -- shim named `grab`.
+    Assert-NotNull $obj.bin 'grab.json missing bin mapping'
+    # checkver + autoupdate blocks for future release automation.
+    Assert-NotNull $obj.checkver   'grab.json missing checkver'
+    Assert-NotNull $obj.autoupdate 'grab.json missing autoupdate'
+}
+
+Test 'scoop grab.json bin[0] shims grab-app.vbs as `grab`' {
+    $obj = Get-Content (Join-Path $scoopRoot 'grab.json') -Raw | ConvertFrom-Json
+    # PS parses [["a","b"]] as a nested list; first element is the pair.
+    $first = @($obj.bin)[0]
+    Assert-Equal 'grab-app.vbs' $first[0]
+    Assert-Equal 'grab'         $first[1]
+}
+
+Test 'scoop grab.json pre_uninstall calls our uninstall.ps1 -Yes -NoPackages' {
+    $c = Get-Content (Join-Path $scoopRoot 'grab.json') -Raw
+    Assert-Match $c 'uninstall\.ps1.*-Yes.*-NoPackages'
+}
+
+Test 'scoop README documents bucket add + install (Phase 6)' {
+    Assert-PathExists (Join-Path $scoopRoot 'README.md')
+    $c = Get-Content (Join-Path $scoopRoot 'README.md') -Raw
+    Assert-Match $c 'scoop bucket add imadjinnation'
+    Assert-Match $c 'scoop install grab'
+    Assert-Match $c 'imadjinnation/scoop-bucket'
+}
+
+# --- install.ps1 bundled-binaries mode -----------------------------------
+Test 'install.ps1 has -UseSystemPython switch (Phase 5.5)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    Assert-Match $c '\[switch\]\$UseSystemPython'
+}
+
+Test 'install.ps1 detects bundled assets/bin/ and skips pip when present' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    Assert-Match $c 'assets\\bin'
+    Assert-Match $c 'HasBundled'
+    Assert-Match $c 'Skipping Python \+ pip'
+}
+
+Test 'install.ps1 ffmpeg check prefers bundled over PATH / winget' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    Assert-Match $c '\$bundledFfmpeg'
+    Assert-Match $c 'Gyan\.FFmpeg'    # winget install still available as fallback
+}
+
+# --- Resolve-Tool bundled-binaries precedence ----------------------------
+Test 'Resolve-Tool prefers assets/bin/ over PATH when bundled binaries present' {
+    # Point GRAB_BUNDLED_BIN_OVERRIDE at a temp dir containing a fake yt-dlp.exe,
+    # then verify Resolve-Tool returns that path (not the one on PATH).
+    $tmpBin = Join-Path $env:TEMP ("grab-bundled-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Path $tmpBin -Force | Out-Null
+    $fake = Join-Path $tmpBin 'yt-dlp.exe'
+    Set-Content -LiteralPath $fake -Value 'stub' -Encoding UTF8
+    try {
+        $env:GRAB_BUNDLED_BIN_OVERRIDE = $tmpBin
+        $script:ToolCache = @{}   # clear cache so our test isn't seeing a stale hit
+        $got = Resolve-Tool 'yt-dlp'
+        Assert-Equal $fake $got 'Resolve-Tool did not return the bundled path'
+    } finally {
+        Remove-Item Env:GRAB_BUNDLED_BIN_OVERRIDE -ErrorAction SilentlyContinue
+        $script:ToolCache = @{}
+        if (Test-Path $tmpBin) { Remove-Item $tmpBin -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Test 'Get-BundledBinDir honors GRAB_BUNDLED_BIN_OVERRIDE' {
+    $env:GRAB_BUNDLED_BIN_OVERRIDE = 'C:\some\override\path'
+    try {
+        Assert-Equal 'C:\some\override\path' (Get-BundledBinDir)
+    } finally {
+        Remove-Item Env:GRAB_BUNDLED_BIN_OVERRIDE -ErrorAction SilentlyContinue
+    }
+}
+
+Test 'Get-BundledBinDir defaults to <repo>/assets/bin' {
+    $expected = Join-Path $repoRoot 'assets\bin'
+    Assert-Equal $expected (Get-BundledBinDir)
+}
+
+# --- README + SmartScreen docs (Phase 5.5) -------------------------------
+Test 'README references all 5 install paths' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c 'winget install imadjinnation\.grab'
+    Assert-Match $c 'scoop install grab'
+    Assert-Match $c 'GRAB-Setup\.exe'
+    Assert-Match $c 'GRAB-Portable\.zip'
+    Assert-Match $c 'git clone https://github\.com/imadjinnation/GRAB-Free-Universal-Media-Downloader'
+}
+
+Test 'README has SmartScreen section pointing at docs/smartscreen.md' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '(?m)## On first run, Windows may warn\b'
+    Assert-Match $c 'SmartScreen'
+    Assert-Match $c 'More info'
+    Assert-Match $c 'Run anyway'
+    Assert-Match $c 'docs/smartscreen\.md'
+}
+
+Test 'docs/smartscreen.md exists + covers verify + false-positive report' {
+    $path = Join-Path $docsRoot 'smartscreen.md'
+    Assert-PathExists $path
+    $c = Get-Content $path -Raw
+    Assert-Match $c 'SmartScreen'
+    Assert-Match $c 'SHA256SUMS\.txt'
+    Assert-Match $c 'false positive'
+    Assert-Match $c 'winget'
+    Assert-Match $c 'scoop'
+}
+
+Test 'CHANGELOG mentions Phase 5.5 distribution scaffolding' {
+    $c = Get-Content (Join-Path $repoRoot 'CHANGELOG.md') -Raw
+    Assert-Match $c 'Phase 5\.5'
+    Assert-Match $c 'build-installer\.ps1'
+    Assert-Match $c 'Inno Setup'
+    Assert-Match $c 'winget'
+    Assert-Match $c 'scoop'
+    Assert-Match $c 'SmartScreen'
+}
+
+Test '.gitignore excludes dist/ (build output) + assets/bin/ (bundled binaries)' {
+    $c = Get-Content (Join-Path $repoRoot '.gitignore') -Raw
+    Assert-Match $c '(?m)^dist/\s*$'
+    Assert-Match $c '(?m)^assets/bin/\s*$'
+    Assert-Match $c 'build/winget/\*\.yaml\.tmp'
+    Assert-Match $c 'build/scoop/grab-\*\.json\.bak'
+}
+
 # --- test count baseline / self-check ------------------------------------
 Test 'test count exceeds pass2 baseline (400+)' {
     # Just prove we're above the phase-4 baseline of 342. Actual count is
@@ -4250,6 +4531,15 @@ Test 'test count exceeds Phase 5 baseline (420+)' {
     # Anything under 420 means a test got silently dropped.
     if ($script:PassCount -lt 420) {
         throw "smoke test count regressed: only $($script:PassCount) passing (was 402 at Phase 4.5, target 425+)"
+    }
+}
+
+Test 'test count exceeds Phase 5.5 baseline (445+)' {
+    # Phase 5.5 added ~25 new tests on top of the 430 Phase 5 baseline
+    # (distribution scaffolding: build script, Inno template, winget,
+    # scoop, bundled binaries, SmartScreen docs). Target 445+.
+    if ($script:PassCount -lt 445) {
+        throw "smoke test count regressed: only $($script:PassCount) passing (Phase 5.5 target 445+)"
     }
 }
 

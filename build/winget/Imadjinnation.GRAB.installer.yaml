@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# Installer manifest for GRAB v0.3.0.
+#
+# TO PHASE 6 (release engineer): after `build-installer.ps1` produces the
+# real GRAB-Setup.exe, replace __SHA256_PLACEHOLDER__ with the sha256 from
+# dist/SHA256SUMS.txt for GRAB-Setup.exe. The URL below assumes the release
+# is tagged `grab-v0.3.0` and GRAB-Setup.exe is uploaded to it -- this is
+# the same tag convention Phase 5's auto-update check greps for.
+
+PackageIdentifier: Imadjinnation.GRAB
+PackageVersion: 0.3.0
+
+# Installer defaults inherited by every entry in Installers below.
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+# Inno Setup accepts these switches natively; documenting them here lets
+# `winget install --silent` do the right thing without extra flags.
+InstallerSwitches:
+  Silent: /VERYSILENT /NORESTART /SUPPRESSMSGBOXES
+  SilentWithProgress: /SILENT /NORESTART /SUPPRESSMSGBOXES
+  Custom: /CURRENTUSER
+
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v0.3.0/GRAB-Setup.exe
+    InstallerSha256: __SHA256_PLACEHOLDER__
+    # Programs and Features entry key -- must match AppId in GRAB-Setup.iss.
+    ProductCode: '{2F1E5B4C-8A3D-4E9F-BE12-3C7A9D6E4B7F}_is1'
+    AppsAndFeaturesEntries:
+      - DisplayName: GRAB
+        Publisher: Imadjinn
+        DisplayVersion: 0.3.0
+        ProductCode: '{2F1E5B4C-8A3D-4E9F-BE12-3C7A9D6E4B7F}_is1'
+        InstallerType: inno
+
+ManifestType: installer
+ManifestVersion: 1.6.0

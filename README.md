@@ -15,27 +15,59 @@ Built as a **calm, always-available system-tray app**. No browser extensions, no
 - **Duplicate-safe**: skips files you've already downloaded
 - **Transparent**: shows which engine ran, real success detection (no false "done" messages)
 
-## Install (3 steps)
+## Install
 
-Requires **Windows 10/11** and **Python 3.10+**.
+Requires **Windows 10/11**. Pick whichever path suits you:
+
+**Easiest -- no dialogs, no warnings:**
 
 ```powershell
-git clone https://github.com/YOUR-USER/imadjinn-grab.git
-cd imadjinn-grab
-.\install.ps1
+# Windows Package Manager (ships with Windows 11 out of the box):
+winget install imadjinnation.grab
+
+# Or Scoop (dev-crowd favorite):
+scoop bucket add imadjinnation https://github.com/imadjinnation/scoop-bucket
+scoop install grab
 ```
 
-The installer:
-1. Verifies Python is present
-2. Installs `yt-dlp`, `gallery-dl`, and the `BurntToast` PowerShell module (for notifications)
-3. Detects or installs `ffmpeg` via winget
-4. Puts a **grab** icon in your system tray
-5. Adds itself to Windows startup by default (opt-out with `install.ps1 -NoStartup`, or disable later in Settings > Startup)
-6. Creates a desktop shortcut for quick access
+Both routes install a private copy under your user profile -- no admin, no UAC prompt, no SmartScreen dialog.
 
-## First run — SmartScreen dialog
+**Direct download** (from the [latest release](https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/latest)):
 
-Because grab is an unsigned PowerShell app, the first time you run it Windows SmartScreen may pop up "Windows protected your PC." That's expected for any tool that isn't Microsoft-signed. Click **More info**, then **Run anyway**. You'll see this at most once per install. (A future release ships a signed installer + VirusTotal badge — tracked in Phase 5.5.)
+- **GRAB-Setup.exe** -- installer wizard. Per-user by default; asks before autostart / desktop icon.
+- **GRAB-Portable.zip** -- extract-and-run. No install, no admin. Drop a `portable-mode.flag` next to `grab-app.vbs` to keep config alongside the binaries (USB-stick style).
+
+**Developers** -- clone the repo and use the classic bootstrapper:
+
+```powershell
+git clone https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader.git grab
+cd grab
+.\install.ps1                    # bundled binaries if present, else pip yt-dlp/gallery-dl
+.\install.ps1 -UseSystemPython   # force pip-managed engines (dev preference)
+.\install.ps1 -NoStartup         # skip Windows autostart
+```
+
+The dev bootstrapper:
+1. Verifies WPF is available (fails fast on WSL / Server Core / LTSC-lite)
+2. Prefers bundled binaries under `assets/bin/` (the installer / portable zip ships them there)
+3. Otherwise installs `yt-dlp[default]` + `gallery-dl` via pip (Python 3.10+), and `BurntToast` for toast notifications
+4. Detects `ffmpeg` (bundled first, then PATH, then `winget install Gyan.FFmpeg`)
+5. Puts a **grab** icon in your system tray + desktop shortcut
+6. Adds itself to Windows startup (opt out with `-NoStartup`, or later in Settings > Startup)
+
+## On first run, Windows may warn
+
+Direct downloads trigger a one-time **SmartScreen** dialog "Windows protected your PC". This is normal -- we're not signing binaries (no $400/yr EV cert for a free open-source tool).
+
+To safely proceed:
+
+1. Click **More info** in the dialog (small link under the app name).
+2. Click **Run anyway**.
+3. GRAB installs normally.
+
+This warning does not appear when installing via **winget** or **scoop** (their trust chain covers the download). Every release also ships `SHA256SUMS.txt` next to the binaries so you can verify the download hasn't been tampered with. Details, verification steps, and how to report a false positive: [docs/smartscreen.md](docs/smartscreen.md).
+
+Source is public on the same GitHub URL as the release, and the tray auto-updates itself via GitHub Releases (see [Updates](#updates) below). A VirusTotal badge will appear in the release notes once Phase 6 wires it up.
 
 ## Use it
 

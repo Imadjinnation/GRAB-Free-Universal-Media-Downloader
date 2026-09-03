@@ -1,0 +1,55 @@
+{
+    "version": "0.3.0",
+    "description": "Free universal media downloader tray app -- yt-dlp + gallery-dl with an arcade WPF UI.",
+    "homepage": "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader",
+    "license": "MIT",
+    "notes": [
+        "GRAB installs as a portable tray app. On first launch it lives in the system tray (bottom-right).",
+        "If Windows SmartScreen warns you: click More info -> Run anyway. GRAB is unsigned (no $400/yr EV cert for a free OSS tool).",
+        "Config lives in %APPDATA%\\grab-app\\ by default. Drop a portable-mode.flag next to grab-app.vbs to keep everything alongside the binaries (USB stick style)."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v0.3.0/GRAB-Portable-v0.3.0.zip",
+            "hash": "sha256:REPLACE_WITH_ZIP_SHA256_AT_RELEASE_TIME"
+        }
+    },
+    "bin": [
+        [
+            "grab-app.vbs",
+            "grab"
+        ]
+    ],
+    "shortcuts": [
+        [
+            "grab-app.vbs",
+            "GRAB"
+        ]
+    ],
+    "persist": [
+        "assets\\bin"
+    ],
+    "post_install": [
+        "Write-Host '  GRAB installed via Scoop.' -ForegroundColor Green",
+        "Write-Host '  Launch by running:  grab' -ForegroundColor Gray",
+        "Write-Host '  Or double-click grab-app.vbs in this folder.' -ForegroundColor Gray"
+    ],
+    "pre_uninstall": [
+        "if (Test-Path \"$dir\\uninstall.ps1\") { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$dir\\uninstall.ps1\" -Yes -NoPackages | Out-Null }"
+    ],
+    "checkver": {
+        "github": "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader",
+        "regex": "grab-v([\\d.]+)"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v$version/GRAB-Portable-v$version.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/imadjinnation/GRAB-Free-Universal-Media-Downloader/releases/download/grab-v$version/SHA256SUMS.txt",
+            "regex": "([a-f0-9]{64})\\s+GRAB-Portable-v$version\\.zip"
+        }
+    }
+}
