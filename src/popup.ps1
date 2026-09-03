@@ -29,13 +29,55 @@ $script:Window = $null
 # ==========================================================================
 
 function _StatusColor([string]$status) {
+    # Per-status color mapping (mockup-matched v0.2.2):
+    #   pending          -> amber   #FFD447  (queued to run soon)
+    #   queued           -> muted   #8974A6  (dark, waiting)
+    #   running          -> amber   #FFD447  (live, in-flight)
+    #   done             -> green   #8DFF6B  (lime success)
+    #   failed           -> red     #FF4444  (REC red)
+    #   cancelled        -> muted   #8974A6  (out of the flow)
     switch ($status) {
-        'pending'   { '#5E5E63' }
-        'running'   { '#F5A87A' }
-        'done'      { '#4CAF50' }
-        'failed'    { '#F44336' }
-        'cancelled' { '#5E5E63' }
-        default     { '#8E8E93' }
+        'pending'   { '#FFD447' }
+        'queued'    { '#8974A6' }
+        'running'   { '#FFD447' }
+        'done'      { '#8DFF6B' }
+        'failed'    { '#FF4444' }
+        'cancelled' { '#8974A6' }
+        default     { '#8974A6' }
+    }
+}
+
+function _CategoryBadge([string]$url) {
+    # Returns @{ Label, Color } for the small VT323 UPPERCASE chip that
+    # sits at the head of a Recent row. Colors follow the mockup palette:
+    #   Videos = amber, Comics = magenta, Audio = cyan,
+    #   Images = green, Social = pink, Misc = muted gray.
+    $cat = try { Get-CategoryForUrl $url } catch { 'Misc' }
+    $map = @{
+        'Videos' = @{ Label='VID'; Color='#FFD447' }
+        'Comics' = @{ Label='COM'; Color='#FF2E93' }
+        'Audio'  = @{ Label='AUD'; Color='#00E5D2' }
+        'Images' = @{ Label='IMG'; Color='#8DFF6B' }
+        'Social' = @{ Label='SOC'; Color='#FF2D8C' }
+        'Misc'   = @{ Label='MSC'; Color='#8974A6' }
+    }
+    if ($map.ContainsKey($cat)) { return $map[$cat] }
+    return $map['Misc']
+}
+
+function Get-QueueStatusText {
+    # Footer status line (PART H2). Returns "SYS: READY . queue idle" when the
+    # queue is empty, otherwise "RUN: n . WAIT: m . CONCURRENCY c". Formatted
+    # for the VT323 footer -- middle-dot separators (chr 183), ALL CAPS labels.
+    try {
+        $q = @(Read-Queue)
+        if ($q.Count -eq 0) { return "SYS: READY $([char]0x00B7) queue idle" }
+        $running = @($q | Where-Object { $_.Status -eq 'running' }).Count
+        $waiting = @($q | Where-Object { $_.Status -in @('pending','queued') }).Count
+        $conc = try { (Get-Config).concurrency } catch { 3 }
+        return "RUN: $running $([char]0x00B7) WAIT: $waiting $([char]0x00B7) CONCURRENCY $conc"
+    } catch {
+        return "SYS: READY $([char]0x00B7) queue idle"
     }
 }
 
@@ -56,6 +98,7 @@ function Build-QueueRow([object]$job) {
     $siteShortEs = _EscapeXaml $siteShort
     $msgEs       = _EscapeXaml $job.StatusMsg
     $statusColor = _StatusColor $job.Status
+    $statusUp    = ($job.Status).ToUpper()
     $actionLabel = switch ($job.Status) {
         'pending'   { [char]0x00D7 }   # ×  (cancel)
         'running'   { [char]0x00D7 }
@@ -66,16 +109,21 @@ function Build-QueueRow([object]$job) {
     $actionTip = if ($job.Status -in @('pending','running')) { 'Cancel' } else { 'Retry' }
     $actionBlock = if ($actionLabel) {
         "<Button x:Name=`"ActionBtn`" Content=`"$actionLabel`" ToolTip=`"$actionTip`" " +
-        "Foreground=`"#8E8E93`" Background=`"Transparent`" BorderThickness=`"0`" " +
+        "Foreground=`"$statusColor`" Background=`"Transparent`" BorderThickness=`"0`" " +
         "Cursor=`"Hand`" FontSize=`"13`" Width=`"26`" Height=`"26`" Margin=`"6,0,0,0`"/>"
     } else { '' }
 
+    # Card layout (mockup v0.2.2): NO left border rail. Instead, a 10x10
+    # glowing LED (Ellipse + DropShadowEffect same color as fill) at the row
+    # head is the single strongest state signal. Card background pushed
+    # slightly darker (#12081E) to match mockup queue rows; site names use
+    # VT323 monospace 11px in teal-cyan #00E5D2 per PART C.
     $xaml = @"
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        CornerRadius="8"
-        Background="#1A1A1D"
-        BorderBrush="#2A2A2E"
+        CornerRadius="6"
+        Background="#12081E"
+        BorderBrush="#241A3E"
         BorderThickness="1"
         Padding="10,8"
         Margin="0,0,0,6">
@@ -86,20 +134,26 @@ function Build-QueueRow([object]$job) {
       <ColumnDefinition Width="Auto"/>
     </Grid.ColumnDefinitions>
     <Ellipse Grid.Column="0" Width="10" Height="10" Fill="$statusColor"
-             VerticalAlignment="Center" Margin="0,0,10,0"/>
+             VerticalAlignment="Center" Margin="0,0,10,0">
+      <Ellipse.Effect>
+        <DropShadowEffect Color="$statusColor" BlurRadius="10" ShadowDepth="0" Opacity="0.9"/>
+      </Ellipse.Effect>
+    </Ellipse>
     <StackPanel Grid.Column="1">
-      <TextBlock Foreground="#F5F5F7" FontSize="12" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap">
-        <Run FontWeight="SemiBold" Text="$siteShortEs "/><Run Foreground="#8E8E93" Text="$urlShort"/>
+      <TextBlock Foreground="#F5EBD0" FontSize="12" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap">
+        <Run FontFamily="__GRAB_FONTS__#VT323" FontSize="11" Foreground="#00E5D2" Text="$siteShortEs "/><Run Foreground="#8974A6" Text="$urlShort"/>
       </TextBlock>
-      <TextBlock Text="$msgEs" Foreground="#8E8E93" FontSize="10" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+      <TextBlock Text="$msgEs" Foreground="#8974A6" FontSize="10" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
     </StackPanel>
     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-      <TextBlock Text="$($job.Status)" Foreground="$statusColor" FontSize="10" VerticalAlignment="Center"/>
+      <TextBlock Text="$statusUp" Foreground="$statusColor" FontSize="11"
+                 FontFamily="__GRAB_FONTS__#VT323" VerticalAlignment="Center"/>
       $actionBlock
     </StackPanel>
   </Grid>
 </Border>
 "@
+    $xaml = $xaml.Replace('__GRAB_FONTS__', (_GrabFontsUri))
     $row = [Windows.Markup.XamlReader]::Parse($xaml)
     $btn = $row.FindName('ActionBtn')
     if ($btn) {
@@ -119,7 +173,12 @@ function Build-RecentRow([object]$entry) {
     $siteShortEs = _EscapeXaml $siteShort
     $doneAt      = if ($entry.DoneAt) { ([datetime]$entry.DoneAt).ToString('MMM d, HH:mm') } else { '' }
     $summary     = "$($entry.FilesAdded) file(s) via $($entry.ToolUsed)"
-    $statusColor = if ($entry.Status -eq 'done') { '#4CAF50' } else { '#F44336' }
+    # Mockup success/fail: lime green (#8DFF6B) for done, red (#FF4444) for failed
+    $statusColor = if ($entry.Status -eq 'done') { '#8DFF6B' } else { '#FF4444' }
+    # Category badge (VT323 UPPERCASE 10px chip per PART A #3):
+    $badge = _CategoryBadge $entry.Url
+    $badgeLabel = $badge.Label
+    $badgeColor = $badge.Color
     # -LiteralPath so folder names with [ ] don't get wildcard-parsed
     # into a phantom "Missing" state.
     $destExists  = ($entry.Dest -and (Test-Path -LiteralPath $entry.Dest))
@@ -129,36 +188,51 @@ function Build-RecentRow([object]$entry) {
     $xaml = @"
 <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        CornerRadius="8"
-        Background="#1A1A1D"
-        BorderBrush="#2A2A2E"
+        CornerRadius="6"
+        Background="#12081E"
+        BorderBrush="#241A3E"
         BorderThickness="1"
         Padding="10,8"
         Margin="0,0,0,6">
   <Grid>
     <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="Auto"/>
       <ColumnDefinition Width="*"/>
       <ColumnDefinition Width="Auto"/>
     </Grid.ColumnDefinitions>
-    <StackPanel Grid.Column="0">
-      <TextBlock Foreground="#F5F5F7" FontSize="12" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap">
-        <Run FontWeight="SemiBold" Text="$siteShortEs "/><Run Foreground="#8E8E93" Text="$urlShort"/>
+    <!-- Category badge: 1px rounded VT323 UPPERCASE 10px chip -->
+    <Border Grid.Column="0" CornerRadius="1"
+            BorderBrush="$badgeColor" BorderThickness="1"
+            Background="Transparent"
+            Padding="5,1"
+            Margin="0,0,8,0"
+            VerticalAlignment="Center">
+      <TextBlock Text="$badgeLabel" Foreground="$badgeColor"
+                 FontFamily="__GRAB_FONTS__#VT323" FontSize="10"
+                 VerticalAlignment="Center"/>
+    </Border>
+    <StackPanel Grid.Column="1">
+      <TextBlock Foreground="#F5EBD0" FontSize="12" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap">
+        <Run FontFamily="__GRAB_FONTS__#VT323" FontSize="11" Foreground="#00E5D2" Text="$siteShortEs "/><Run Foreground="#8974A6" Text="$urlShort"/>
       </TextBlock>
-      <TextBlock Foreground="#8E8E93" FontSize="10" Margin="0,2,0,0">
+      <TextBlock Foreground="#8974A6" FontSize="10" Margin="0,2,0,0">
         <Run Text="$doneAt"/><Run Text=" &#183; "/><Run Text="$summary"/>
       </TextBlock>
     </StackPanel>
-    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
       <Button x:Name="OpenBtn" Content="$openLabel" IsEnabled="$openEnabled"
-              Foreground="#F5F5F7" Background="#26262A" BorderThickness="0"
-              Cursor="Hand" FontSize="10" Padding="10,4" Margin="0,0,4,0"/>
+              Foreground="#00E5D2" Background="Transparent" BorderBrush="#00E5D2" BorderThickness="1"
+              Cursor="Hand" FontSize="10" FontFamily="__GRAB_FONTS__#VT323"
+              Padding="10,4" Margin="0,0,4,0"/>
       <Button x:Name="RetryBtn" Content="Re-grab"
-              Foreground="#F5F5F7" Background="#26262A" BorderThickness="0"
-              Cursor="Hand" FontSize="10" Padding="10,4"/>
+              Foreground="#00E5D2" Background="Transparent" BorderBrush="#00E5D2" BorderThickness="1"
+              Cursor="Hand" FontSize="10" FontFamily="__GRAB_FONTS__#VT323"
+              Padding="10,4"/>
     </StackPanel>
   </Grid>
 </Border>
 "@
+    $xaml = $xaml.Replace('__GRAB_FONTS__', (_GrabFontsUri))
     $row = [Windows.Markup.XamlReader]::Parse($xaml)
     $openBtn  = $row.FindName('OpenBtn')
     $retryBtn = $row.FindName('RetryBtn')
@@ -177,13 +251,45 @@ function Build-RecentRow([object]$entry) {
     return $row
 }
 
+function _GrabFontsUri {
+    # file:///D:/path/to/assets/fonts/  -- WPF FontFamily URI + '#Family'
+    # returns the trailing-slash version because "URI/#Name" is the well-formed
+    # shape WPF wants (fonts folder + hash + family name).
+    $abs = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets\fonts'
+    return 'file:///' + (($abs -replace '\\','/').TrimEnd('/')) + '/'
+}
+
+function _GrabThemeUri {
+    # Returns the file:/// URI of a runtime copy of theme.xaml with the
+    # __GRAB_FONTS__ tokens already substituted, so theme-styled controls
+    # (ArcadePrimary/Tab/Ghost etc.) actually resolve to Silkscreen/VT323/
+    # Inter instead of the WPF default. See Get-RuntimeThemeUri in utils.ps1
+    # for the rationale.
+    $srcTheme = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\theme.xaml'
+    return Get-RuntimeThemeUri -SourceThemePath $srcTheme -FontsUri (_GrabFontsUri)
+}
+
+function _GrabAssetsUri {
+    # file:///D:/path/to/assets -- base; callers append /<file>
+    $abs = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
+    return 'file:///' + (($abs -replace '\\','/').TrimEnd('/'))
+}
+
 function Load-PopupWindow {
     if ($script:Window) { return $script:Window }
 
     $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\popup.xaml'
-    [xml]$xaml = Get-Content $xamlPath -Raw -Encoding UTF8
-    $reader = New-Object System.Xml.XmlNodeReader $xaml
-    $w = [Windows.Markup.XamlReader]::Load($reader)
+    # Substitute the placeholders:
+    #   __GRAB_FONTS__  -> file:///.../assets/fonts/  (Silkscreen/VT323/Inter)
+    #   __GRAB_THEME__  -> file:///.../ui/theme.xaml  (shared arcade styles)
+    #   __GRAB_ASSETS__ -> file:///.../assets         (scanlines.png)
+    # Tests apply the same substitution before parsing. String .Replace()
+    # (not -replace) so backslashes don't need re-escaping.
+    $xamlText = (Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8).
+                Replace('__GRAB_FONTS__',  (_GrabFontsUri)).
+                Replace('__GRAB_THEME__',  (_GrabThemeUri)).
+                Replace('__GRAB_ASSETS__', (_GrabAssetsUri))
+    $w = [Windows.Markup.XamlReader]::Parse($xamlText)
 
     # Named element handles
     $ctl = @{}
@@ -191,9 +297,12 @@ function Load-PopupWindow {
                      'TabPaste','TabQueue','TabRecent',
                      'PastePanel','QueuePanel','RecentPanel',
                      'UrlBox','MultiBox','SingleInputBorder','MultiInputBorder',
-                     'Hint','StatusLine','ToggleMulti','GrabBtn','SensitiveToggle',
+                     'Hint','HintKicker','StatusLine','ToggleMulti','GrabBtn','SensitiveToggle',
+                     'AmberCaret','FooterStatus',
                      'QueueList','QueueEmpty','QueueClearDone',
-                     'RecentList','RecentEmpty')) {
+                     'RecentList','RecentEmpty',
+                     'ClearRecentBtn','ClearOldRecentBtn',
+                     'ScanlinesOverlay')) {
         $ctl[$n] = $w.FindName($n)
     }
 
@@ -232,10 +341,20 @@ function Load-PopupWindow {
     }.GetNewClosure())
 
     # ---------- Tab switching ----------------------------------------------
+    # Three-color arcade rule (PART A #1):
+    #   PASTE  -> amber underline  (Tag = "active-amber")
+    #   QUEUE  -> cyan  underline  (Tag = "active-cyan")
+    #   RECENT -> green underline  (Tag = "active-green")
+    # The ArcadeTab template picks the color from the Tag value.
+    $tabColorMap = @{
+        'TabPaste'  = 'active-amber'
+        'TabQueue'  = 'active-cyan'
+        'TabRecent' = 'active-green'
+    }
     $switchTab = {
         param($active)
         foreach ($t in @('TabPaste','TabQueue','TabRecent')) {
-            $CtlLocal[$t].Tag = if ($t -eq $active) { 'active' } else { $null }
+            $CtlLocal[$t].Tag = if ($t -eq $active) { $tabColorMap[$t] } else { $null }
         }
         $CtlLocal.PastePanel.Visibility  = if ($active -eq 'TabPaste')  { 'Visible' } else { 'Collapsed' }
         $CtlLocal.QueuePanel.Visibility  = if ($active -eq 'TabQueue')  { 'Visible' } else { 'Collapsed' }
@@ -312,6 +431,13 @@ function Load-PopupWindow {
         if ($e.Key -eq 'Return') { & $doSubmit }
         elseif ($e.Key -eq 'Escape') { $WinLocal.Hide() }
     }.GetNewClosure())
+
+    # Amber blinking caret (PART H1): hide the decorative caret while the
+    # real TextBox has keyboard focus (WPF's native caret takes over).
+    if ($ctl.AmberCaret) {
+        $ctl.UrlBox.Add_GotKeyboardFocus({ $CtlLocal.AmberCaret.Visibility = 'Collapsed' }.GetNewClosure())
+        $ctl.UrlBox.Add_LostKeyboardFocus({ $CtlLocal.AmberCaret.Visibility = 'Visible'   }.GetNewClosure())
+    }
     $ctl.MultiBox.Add_KeyDown({
         param($sender, $e)
         if ($e.Key -eq 'Return' -and ([System.Windows.Input.Keyboard]::Modifiers -band 'Control')) { & $doSubmit }
@@ -324,6 +450,11 @@ function Load-PopupWindow {
     $renderQueue = {
         $q = @(Read-Queue) | Sort-Object -Property AddedAt -Descending
         $CtlLocal.QueueList.Children.Clear()
+        # Refresh the footer status text (PART H2). Uses helper so any caller
+        # can force-update the footer without knowing the queue schema.
+        if ($CtlLocal.FooterStatus) {
+            try { $CtlLocal.FooterStatus.Text = Get-QueueStatusText } catch {}
+        }
         if ($q.Count -eq 0) {
             $CtlLocal.QueueEmpty.Visibility = 'Visible'
             return
@@ -367,6 +498,47 @@ function Load-PopupWindow {
     $ctl.QueueClearDone.Add_Click({
         try { Clear-QueueDone; & $renderQueue } catch { Log-Err "clear-done: $($_.Exception.Message)" }
     }.GetNewClosure())
+
+    # Recent tab: CLEAR ALL (danger) + CLEAR > 30 DAYS (ghost). Both only
+    # touch recent.json (history) -- the downloaded files themselves stay on
+    # disk. Sensitive downloads never appear in Recent to begin with (see
+    # Invoke-QueueTick), but non-sensitive entries can still be personal and
+    # users need a way to purge them.
+    if ($ctl.ClearRecentBtn) {
+        $ctl.ClearRecentBtn.Add_Click({
+            try {
+                # Confirm-ArcadeDialog lives in tray.ps1; both files are dot-
+                # sourced into the same scope by grab-app.ps1, so it's visible
+                # at click time. Guard for the standalone-test case where the
+                # dialog isn't loaded, and fall through to the clear.
+                $ok = $true
+                if (Get-Command Confirm-ArcadeDialog -ErrorAction SilentlyContinue) {
+                    $ok = Confirm-ArcadeDialog `
+                        -Title   'CLEAR RECENT?' `
+                        -Message ("This removes all entries from the Recent tab.`n`n" +
+                                  "Downloaded files stay on disk -- only the history list is cleared.") `
+                        -YesLabel 'CLEAR' `
+                        -NoLabel  'CANCEL' `
+                        -Owner    $WinLocal
+                }
+                if ($ok) {
+                    $removed = Clear-Recent
+                    Log-Info "recent CLEAR ALL: removed $removed entry(ies)"
+                    & $renderRecent
+                }
+            } catch { Log-Err "clear-recent: $($_.Exception.Message)" }
+        }.GetNewClosure())
+    }
+    if ($ctl.ClearOldRecentBtn) {
+        $ctl.ClearOldRecentBtn.Add_Click({
+            try {
+                $cutoff = (Get-Date).AddDays(-30)
+                $removed = Clear-Recent -OlderThan $cutoff
+                Log-Info "recent CLEAR > 30 DAYS: removed $removed entry(ies)"
+                & $renderRecent
+            } catch { Log-Err "clear-recent-old: $($_.Exception.Message)" }
+        }.GetNewClosure())
+    }
 
     # Expose helpers on the window so Show-Popup can drive tab switching
     # and other external callers can reach controls / callbacks.
@@ -434,6 +606,13 @@ function Show-Popup {
             $p = Get-DockedPosition $w
             $w.Left = $p.X
             $w.Top  = $p.Y
+        }
+
+        # Honor the crtScanlines toggle every time the popup shows so a
+        # config change (via Settings) picks up on next open. Overlay is
+        # hidden when the config flag is $false.
+        if ($ctl.ScanlinesOverlay) {
+            $ctl.ScanlinesOverlay.Visibility = if ($cfg.crtScanlines) { 'Visible' } else { 'Collapsed' }
         }
 
         # Prefill URL from clipboard if it looks like one

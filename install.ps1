@@ -180,11 +180,16 @@ function Make-Shortcut([string]$name, [string]$target, [string]$args, [string]$i
     Ok "$name.lnk"
 }
 
+# Prefer the bundled multi-res icon; fall back to a shell32.dll glyph so the
+# shortcut still gets a face even before the .ico ships.
+$grabIco = Join-Path $script:Root 'assets\icon.ico'
+$grabIconLoc = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { "$env:SystemRoot\System32\shell32.dll,143" }
+
 Make-Shortcut `
     -name 'grab' `
     -target 'powershell.exe' `
     -args   ('-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"') `
-    -icon   "$env:SystemRoot\System32\shell32.dll,143" `
+    -icon   $grabIconLoc `
     -desc   'Launch the grab tray app' `
     -workDir $script:Root
 
@@ -208,7 +213,7 @@ if ($NoStartup) {
     $sc.TargetPath = 'powershell.exe'
     $sc.Arguments  = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"'
     $sc.WorkingDirectory = $script:Root
-    $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,143"
+    $sc.IconLocation = $grabIconLoc
     $sc.Description = 'Start grab tray at login'
     $sc.Save()
     Ok "Autostart enabled: $startupLnk"

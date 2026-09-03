@@ -50,6 +50,7 @@ function Get-Config {
             concurrency          = 3
             autostart            = $true
             cookieBrowser        = 'chrome'
+            videoQuality         = 'best'                 # yt-dlp preferred ceiling
             toastsEnabled        = $true
             popupPositionX       = $null
             popupPositionY       = $null
@@ -58,11 +59,35 @@ function Get-Config {
             sensitiveByDefault   = $false                 # every download routes to .private
             sensitiveSites       = @()                    # URL substrings that auto-route to .private
             sensitiveFolderName  = '.private'             # folder name inside category
+            # Display (arcade cabinet effects)
+            crtScanlines         = $true                  # static CRT overlay in popup/settings/about
         }
         $default | ConvertTo-Json -Depth 4 | Set-Content -Path $script:ConfigPath -Encoding UTF8
         return $default
     }
-    $cfg = Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
+    # Malformed config.json used to crash the app on startup (ConvertFrom-Json
+    # throws, then every PSObject.Properties.Name.Contains(...) call below
+    # blows up on the null $cfg). If the parse fails, back up the corrupt file
+    # (so users can inspect it) and continue with defaults so grab keeps working.
+    $cfg = $null
+    try {
+        $cfg = Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
+    } catch {
+        Log-Warn "config.json is corrupt ($($_.Exception.Message)); backing up and using defaults."
+        try {
+            $backup = "$($script:ConfigPath).corrupt-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+            Copy-Item -LiteralPath $script:ConfigPath -Destination $backup -Force -ErrorAction SilentlyContinue
+        } catch {}
+        # Rewrite fresh defaults + return them directly (short-circuit back-fill).
+        Remove-Item -LiteralPath $script:ConfigPath -Force -ErrorAction SilentlyContinue
+        return Get-Config
+    }
+    if ($null -eq $cfg) {
+        # Empty file / whitespace-only: same recovery path.
+        Log-Warn 'config.json parsed as $null; rewriting defaults.'
+        Remove-Item -LiteralPath $script:ConfigPath -Force -ErrorAction SilentlyContinue
+        return Get-Config
+    }
     # Back-fill new keys added post-first-config, so older configs still work
     if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveSites')) {
         $cfg | Add-Member -MemberType NoteProperty -Name sensitiveSites -Value @() -Force
@@ -72,6 +97,14 @@ function Get-Config {
     }
     if (-not $cfg.PSObject.Properties.Name.Contains('sensitiveFolderName')) {
         $cfg | Add-Member -MemberType NoteProperty -Name sensitiveFolderName -Value '.private' -Force
+    }
+    if (-not $cfg.PSObject.Properties.Name.Contains('videoQuality')) {
+        $cfg | Add-Member -MemberType NoteProperty -Name videoQuality -Value 'best' -Force
+    }
+    if (-not $cfg.PSObject.Properties.Name.Contains('crtScanlines')) {
+        # Back-fill: default TRUE so existing configs keep the arcade cabinet
+        # look after upgrading. Users can uncheck it in Settings > Display.
+        $cfg | Add-Member -MemberType NoteProperty -Name crtScanlines -Value $true -Force
     }
     return $cfg
 }
@@ -86,6 +119,52 @@ function Update-Config([hashtable]$updates) {
     foreach ($key in $updates.Keys) { $cfg.$key = $updates[$key] }
     Set-Config $cfg
     return $cfg
+}
+
+# ---------- Runtime theme URI (font-token substitution) -------------------
+# theme.xaml on disk has __GRAB_FONTS__ placeholder tokens (e.g. inside
+# ArcadePrimary, ArcadeTab, Kicker, etc.). Our XAML loaders substitute those
+# tokens in the WINDOW xaml text before parsing -- but the theme is included
+# via `<ResourceDictionary Source="file:///.../theme.xaml"/>` and WPF loads
+# that file DIRECTLY from disk without our substitution. Result: every
+# theme-styled control (buttons, tabs, tooltips, section headers, kickers)
+# silently falls back to the WPF default font instead of Silkscreen / VT323
+# / Inter -- a big visual regression that no earlier test caught.
+#
+# Fix: at load time, materialize a substituted copy of theme.xaml to a
+# stable temp file and return its file:/// URI. Window loaders point their
+# __GRAB_THEME__ replacement at this URI so WPF sees the resolved fonts.
+# Written to <AppData>\grab-app\.runtime-theme.xaml so it survives reboots
+# without stacking multiple temp files.
+function Get-RuntimeThemeUri {
+    param(
+        [Parameter(Mandatory)][string]$SourceThemePath,
+        [Parameter(Mandatory)][string]$FontsUri
+    )
+    Ensure-AppData
+    try {
+        $raw = Get-Content -LiteralPath $SourceThemePath -Raw -Encoding UTF8
+        $sub = $raw.Replace('__GRAB_FONTS__', $FontsUri)
+        $out = Join-Path $script:AppData '.runtime-theme.xaml'
+        # Write only when different -- avoids touching mtime every launch.
+        $needWrite = $true
+        if (Test-Path -LiteralPath $out) {
+            try {
+                $cur = Get-Content -LiteralPath $out -Raw -Encoding UTF8
+                if ($cur -eq $sub) { $needWrite = $false }
+            } catch {}
+        }
+        if ($needWrite) {
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($out, $sub, $utf8NoBom)
+        }
+        return 'file:///' + (($out -replace '\\','/'))
+    } catch {
+        Log-Warn "Get-RuntimeThemeUri fell back to source theme: $($_.Exception.Message)"
+        # Fallback: return the on-disk theme URI so the load doesn't fail.
+        # Fonts will still fall back, but the UI stays functional.
+        return 'file:///' + (($SourceThemePath -replace '\\','/'))
+    }
 }
 
 # ---------- Tool discovery (portable) -------------------------------------
@@ -156,9 +235,14 @@ function Send-Toast([string]$title, [string]$body, [string]$action = $null) {
         Import-Module BurntToast -ErrorAction Stop
         $params = @{ Text = @($title, $body) }
         if ($action) { $params['AppLogo'] = $null }  # placeholder for future icon
+        # BurntToast wraps the Windows toast API which the OS themes itself;
+        # a custom XML template with our arcade palette is possible but
+        # brittle across Windows versions. Kept as-is per Part D scope note.
         New-BurntToastNotification @params
     } catch {
-        Write-Host "[toast] $title -- $body" -ForegroundColor Cyan
+        # Console fallback: magenta matches the arcade palette (warnings /
+        # generic notify) so debugging output is visually consistent.
+        Write-Host "[toast] $title -- $body" -ForegroundColor Magenta
     }
 }
 
@@ -203,15 +287,32 @@ function Test-IsSensitiveUrl([string]$url) {
     return $false
 }
 
-function Set-FolderHidden([string]$path) {
+function Set-FolderHidden([string]$path, [switch]$Recurse) {
     # Idempotently sets Hidden attribute on a folder. Wrapped in try/catch
     # because attribute writes can fail on protected paths -- and that
-    # should never block a download.
+    # should never block a download. When -Recurse is set, also hides
+    # every subfolder + file inside so nothing peeks through even if the
+    # user has "show hidden items" off but drills into the root by path.
+    $failCount = 0
     try {
         if (Test-Path -LiteralPath $path) {
             $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
             if (-not ($item.Attributes -band [System.IO.FileAttributes]::Hidden)) {
                 $item.Attributes = $item.Attributes -bor [System.IO.FileAttributes]::Hidden
+            }
+            if ($Recurse) {
+                # Get-ChildItem -Force sees hidden entries; skip reparse points
+                # (junctions/symlinks) to avoid following into the OS tree.
+                Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
+                    ForEach-Object {
+                        try {
+                            if (-not ($_.Attributes -band [System.IO.FileAttributes]::Hidden)) {
+                                $_.Attributes = $_.Attributes -bor [System.IO.FileAttributes]::Hidden
+                            }
+                        } catch { $failCount++ }
+                    }
+                if ($failCount -gt 0) { Log-Warn "Set-FolderHidden -Recurse: $failCount item(s) refused Hidden under $path" }
             }
         }
     } catch { Log-Warn "Set-FolderHidden failed on $path : $($_.Exception.Message)" }
@@ -221,6 +322,38 @@ function Get-CategoryForUrl([string]$u) {
     # Top-level bucket for filmmaker-friendly folder layout.
     # Precedence: explicit lists first, then fall back to Misc.
     $u = $u.ToLower()
+
+    # --- Audio (music, podcasts, RSS feeds) --------------------------------
+    # Checked BEFORE Comics so soundcloud/bandcamp go to Audio, not Videos.
+    # Extension check catches direct .mp3/.flac/etc links regardless of host.
+    # RSS/feed detection: URLs ending in feed markers -- podcast-shaped.
+    $audioHosts = @(
+        'soundcloud.com','bandcamp.com','mixcloud.com','audiomack.com',
+        'hearthis.at','ccmixter.org','freemusicarchive.org','jamendo.com',
+        'khinsider.com','radio.garden','tunein.com','somafm.com',
+        'live365.com','iheart.com/podcast','spotifypodcast','applepodcasts.com',
+        'podcasts.apple.com','overcast.fm','pca.st','castbox.fm','podbean.com',
+        'anchor.fm','buzzsprout.com','simplecast.com','transistor.fm',
+        'libsyn.com','spreaker.com','redcircle.com','omny.fm','megaphone.link',
+        'art19.com'
+    )
+    foreach ($h in $audioHosts) { if ($u -match [regex]::Escape($h)) { return 'Audio' } }
+    # archive.org: only route to Audio when the URL hints at audio content
+    # (details/audio or explicit audio download). General archive.org URLs
+    # (books, video, images) still fall through to Misc/Videos as before.
+    if ($u -match 'archive\.org' -and $u -match '(/details/[^/]*audio|/details/opensource_audio|\.mp3(\?|$)|\.flac(\?|$)|\.wav(\?|$))') {
+        return 'Audio'
+    }
+    # Direct-file extension: strip query, then match .mp3/.m4a/.flac/.opus/.ogg/.wav/.aac
+    $noQuery = ($u -split '[?#]')[0]
+    if ($noQuery -match '\.(mp3|m4a|flac|opus|ogg|wav|aac)$') { return 'Audio' }
+    # Podcast-shaped feeds: RSS/XML endpoints where the path looks feed-y.
+    # We require BOTH a feed marker AND a podcast/audio hint to avoid catching
+    # generic blog RSS as audio.
+    $isFeedShape = ($noQuery -match '/(rss|feed|feeds|podcast)(/|$)') -or
+                   ($noQuery -match '\.(rss|xml)$')
+    $hasPodcastHint = ($u -match 'podcast|episode|audio|show|/rss/|/feed/|feeds\.')
+    if ($isFeedShape -and $hasPodcastHint) { return 'Audio' }
 
     # --- Comics / manga / webtoons -----------------------------------------
     $comicHosts = @(
@@ -234,10 +367,12 @@ function Get-CategoryForUrl([string]$u) {
     foreach ($h in $comicHosts) { if ($u -match [regex]::Escape($h)) { return 'Comics' } }
 
     # --- Videos ------------------------------------------------------------
+    # Note: soundcloud/bandcamp used to live here, they now route to Audio
+    # (matched above). Kept them out of this list too so the intent is clear.
     $videoHosts = @(
         'youtube.com','youtu.be','tiktok.com','vimeo.com','twitch.tv',
         'dailymotion.com','fb.watch','streamable.com','bitchute.com',
-        'rumble.com','odysee.com','peertube','soundcloud.com','bandcamp.com'
+        'rumble.com','odysee.com','peertube'
     )
     foreach ($h in $videoHosts) { if ($u -match [regex]::Escape($h)) { return 'Videos' } }
 

@@ -14,6 +14,9 @@ Add-Type -AssemblyName WindowsBase           | Out-Null
 Add-Type -AssemblyName System.Windows.Forms  | Out-Null
 
 . "$PSScriptRoot\utils.ps1"
+# Confirm-ArcadeDialog lives in tray.ps1 -- do NOT dot-source it here
+# (creates a load-order cycle; grab-app.ps1 sources both into the same
+# scope, so the function is visible at click time).
 
 $script:SettingsWindow = $null
 
@@ -32,7 +35,10 @@ function Set-Autostart([bool]$enable) {
         $entry = Join-Path (Split-Path $PSScriptRoot -Parent) 'grab-app.ps1'
         $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
         $sc.WorkingDirectory = (Split-Path $PSScriptRoot -Parent)
-        $sc.IconLocation = "$env:SystemRoot\System32\imageres.dll,109"
+        # Prefer the bundled multi-res icon; fall back to a shell glyph.
+        $repoRoot = Split-Path $PSScriptRoot -Parent
+        $grabIco  = Join-Path $repoRoot 'assets\icon.ico'
+        $sc.IconLocation = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { "$env:SystemRoot\System32\imageres.dll,109" }
         $sc.Description  = 'Launch grab tray at login'
         $sc.Save()
     } else {
@@ -40,20 +46,45 @@ function Set-Autostart([bool]$enable) {
     }
 }
 
+function _GrabFontsUri {
+    # file:///D:/path/to/assets/fonts/  -- WPF FontFamily URI + '#Family'
+    $abs = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets\fonts'
+    return 'file:///' + (($abs -replace '\\','/').TrimEnd('/')) + '/'
+}
+
+function _GrabThemeUri {
+    # Returns the file:/// URI of a runtime copy of theme.xaml with the
+    # __GRAB_FONTS__ tokens already substituted (see utils.ps1 for why).
+    $srcTheme = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\theme.xaml'
+    return Get-RuntimeThemeUri -SourceThemePath $srcTheme -FontsUri (_GrabFontsUri)
+}
+
+function _GrabAssetsUri {
+    # file:///D:/path/to/assets -- base; callers append /<file>
+    $abs = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
+    return 'file:///' + (($abs -replace '\\','/').TrimEnd('/'))
+}
+
 function Load-SettingsWindow {
     if ($script:SettingsWindow) { return $script:SettingsWindow }
 
     $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\settings.xaml'
-    [xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
-    $reader = New-Object System.Xml.XmlNodeReader $xaml
-    $w = [Windows.Markup.XamlReader]::Load($reader)
+    # Substitute the three placeholder tokens so bundled fonts, the shared
+    # theme.xaml dictionary, and the scanlines PNG all resolve at runtime.
+    # See popup.ps1 for the same pattern.
+    $xamlText = (Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8).
+                Replace('__GRAB_FONTS__',  (_GrabFontsUri)).
+                Replace('__GRAB_THEME__',  (_GrabThemeUri)).
+                Replace('__GRAB_ASSETS__', (_GrabAssetsUri))
+    $w = [Windows.Markup.XamlReader]::Parse($xamlText)
 
     $ctl = @{}
     foreach ($n in @('TitleBar','MinBtn','CloseBtn',
                      'DownloadFolder','BrowseBtn','AskBeforeEach',
                      'ConcurrencySlider','ConcurrencyLabel',
-                     'CookieBrowser','ToastsEnabled','ClipboardWatch','Autostart',
+                     'CookieBrowser','VideoQuality','ToastsEnabled','ClipboardWatch','Autostart',
                      'SensitiveByDefault','SensitiveSites',
+                     'CrtScanlines','ScanlinesOverlay',
                      'VersionLabel','OpenStateBtn','OpenLogsBtn',
                      'ResetBtn','SaveBtn','CancelBtn','StatusLine')) {
         $ctl[$n] = $w.FindName($n)
@@ -72,6 +103,16 @@ function Load-SettingsWindow {
     # ---------- Concurrency slider live label ------------------------------
     $ctl.ConcurrencySlider.Add_ValueChanged({
         $CtlLocal.ConcurrencyLabel.Text = [int]$CtlLocal.ConcurrencySlider.Value
+    }.GetNewClosure())
+
+    # ---------- CRT scanlines live preview ---------------------------------
+    # Flip the overlay Visibility as soon as the box changes; the config
+    # value only writes on Save, so users can toggle back and forth freely.
+    $ctl.CrtScanlines.Add_Checked({
+        if ($CtlLocal.ScanlinesOverlay) { $CtlLocal.ScanlinesOverlay.Visibility = 'Visible' }
+    }.GetNewClosure())
+    $ctl.CrtScanlines.Add_Unchecked({
+        if ($CtlLocal.ScanlinesOverlay) { $CtlLocal.ScanlinesOverlay.Visibility = 'Collapsed' }
     }.GetNewClosure())
 
     # ---------- Browse folder ---------------------------------------------
@@ -124,11 +165,13 @@ function Load-SettingsWindow {
                 askBeforeEach      = [bool]$CtlLocal.AskBeforeEach.IsChecked
                 concurrency        = [int]$CtlLocal.ConcurrencySlider.Value
                 cookieBrowser      = ($CtlLocal.CookieBrowser.SelectedItem.Content).ToString()
+                videoQuality       = ($CtlLocal.VideoQuality.SelectedItem.Content).ToString()
                 toastsEnabled      = [bool]$CtlLocal.ToastsEnabled.IsChecked
                 clipboardWatch     = [bool]$CtlLocal.ClipboardWatch.IsChecked
                 autostart          = [bool]$CtlLocal.Autostart.IsChecked
                 sensitiveByDefault = [bool]$CtlLocal.SensitiveByDefault.IsChecked
                 sensitiveSites     = $sitePatterns
+                crtScanlines       = [bool]$CtlLocal.CrtScanlines.IsChecked
                 firstRunComplete   = $true
             }
             Update-Config $updates | Out-Null
@@ -150,23 +193,32 @@ function Load-SettingsWindow {
     $ctl.CancelBtn.Add_Click({ $WinLocal.Hide() }.GetNewClosure())
 
     $ctl.ResetBtn.Add_Click({
-        $answer = [System.Windows.MessageBox]::Show(
-            'Reset every setting to its default value?' + "`n`n" +
-            'This does NOT delete downloads or history -- only the settings on this screen.',
-            'grab -- Reset settings',
-            [System.Windows.MessageBoxButton]::YesNo,
-            [System.Windows.MessageBoxImage]::Warning)
-        if ($answer -eq 'Yes') {
+        # Arcade-styled Yes/No modal instead of the native Windows MessageBox,
+        # so nothing in this window falls back to Windows-native chrome.
+        # Falls back to $false (no-op) if the dialog can't render.
+        $confirmed = $false
+        if (Get-Command Confirm-ArcadeDialog -ErrorAction SilentlyContinue) {
+            $confirmed = Confirm-ArcadeDialog `
+                -Title   'RESET ALL SETTINGS?' `
+                -Message ("Reset every setting to its default value?`n`n" +
+                          "This does NOT delete downloads or history -- only the settings on this screen.") `
+                -YesLabel 'RESET' `
+                -NoLabel  'CANCEL' `
+                -Owner    $WinLocal
+        }
+        if ($confirmed) {
             $defaultFolder = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
             $CtlLocal.DownloadFolder.Text = $defaultFolder
             $CtlLocal.AskBeforeEach.IsChecked = $false
             $CtlLocal.ConcurrencySlider.Value = 3
             $CtlLocal.CookieBrowser.SelectedIndex = 0
+            $CtlLocal.VideoQuality.SelectedIndex = 0
             $CtlLocal.ToastsEnabled.IsChecked  = $true
             $CtlLocal.ClipboardWatch.IsChecked = $false
             $CtlLocal.Autostart.IsChecked      = $true
             $CtlLocal.SensitiveByDefault.IsChecked = $false
             $CtlLocal.SensitiveSites.Text = ''
+            $CtlLocal.CrtScanlines.IsChecked = $true
             $CtlLocal.StatusLine.Text = 'Defaults loaded. Click Save to apply.'
         }
     }.GetNewClosure())
@@ -201,10 +253,28 @@ function Show-Settings {
         }
         if (-not $found) { $ctl.CookieBrowser.SelectedIndex = 0 }
 
+        # Video quality combo
+        $qVal = if ($cfg.videoQuality) { [string]$cfg.videoQuality } else { 'best' }
+        $qFound = $false
+        for ($i = 0; $i -lt $ctl.VideoQuality.Items.Count; $i++) {
+            if (($ctl.VideoQuality.Items[$i].Content).ToString() -eq $qVal) {
+                $ctl.VideoQuality.SelectedIndex = $i
+                $qFound = $true
+                break
+            }
+        }
+        if (-not $qFound) { $ctl.VideoQuality.SelectedIndex = 0 }
+
         $ctl.ToastsEnabled.IsChecked  = [bool]$cfg.toastsEnabled
         $ctl.ClipboardWatch.IsChecked = [bool]$cfg.clipboardWatch
         $ctl.Autostart.IsChecked      = [bool]$cfg.autostart
         $ctl.SensitiveByDefault.IsChecked = [bool]$cfg.sensitiveByDefault
+        # CRT scanlines: default $true (see Get-Config back-fill).
+        $ctl.CrtScanlines.IsChecked   = [bool]$cfg.crtScanlines
+        # Live-preview: toggling the checkbox flips the overlay right away.
+        if ($ctl.ScanlinesOverlay) {
+            $ctl.ScanlinesOverlay.Visibility = if ($cfg.crtScanlines) { 'Visible' } else { 'Collapsed' }
+        }
         # Show current sensitive-sites list, one per line
         $ctl.SensitiveSites.Text = if ($cfg.sensitiveSites) { ($cfg.sensitiveSites -join "`r`n") } else { '' }
         $ctl.VersionLabel.Text = "grab v$($cfg.version)  ·  state: $(Get-AppDataPath)"

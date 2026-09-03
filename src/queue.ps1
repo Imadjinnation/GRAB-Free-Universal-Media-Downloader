@@ -208,6 +208,66 @@ function Get-Recent {
     $r | ForEach-Object { $_ }
 }
 
+function Clear-Recent {
+    # Purge Recent entries. Two modes:
+    #   Clear-Recent                          -> empty every entry
+    #   Clear-Recent -OlderThan (Get-Date)... -> drop only entries whose
+    #                                            DoneAt is older than the
+    #                                            supplied cutoff.
+    # ONLY touches recent.json -- downloaded files on disk are untouched.
+    # Returns the number of entries removed (0 on empty / no-op).
+    param(
+        [datetime]$OlderThan
+    )
+    $path = Get-RecentPath
+    Ensure-AppData
+    if (-not (Test-Path $path)) { return 0 }
+    $raw = Get-Content $path -Raw -Encoding UTF8
+    if (-not $raw) { return 0 }
+    $existing = @()
+    try {
+        # PS 5.1 quirk: `$raw | ConvertFrom-Json` places a JSON-array result on
+        # the pipeline as ONE object (the array), so `@(...)` around it yields
+        # a 1-element array containing the array. Assign first, then coerce
+        # based on the actual runtime type. Same fix pattern as Read-Queue.
+        $parsed = $raw | ConvertFrom-Json
+        $existing = if ($null -eq $parsed) { @() }
+                    elseif ($parsed -is [array]) { $parsed }
+                    else { @($parsed) }
+    } catch {
+        # Corrupt json: treat as "clear everything" -- write empty array.
+        $existing = @()
+    }
+    $before = @($existing).Count
+    if ($PSBoundParameters.ContainsKey('OlderThan')) {
+        $kept = @($existing | Where-Object {
+            $ok = $false
+            if ($_.DoneAt) {
+                try {
+                    $dt = [datetime]$_.DoneAt
+                    if ($dt -ge $OlderThan) { $ok = $true }
+                } catch {
+                    # Unparseable stamp -- keep it (better than losing history).
+                    $ok = $true
+                }
+            } else {
+                # Missing stamp -- keep, same defensive rationale.
+                $ok = $true
+            }
+            $ok
+        })
+    } else {
+        $kept = @()
+    }
+    $removed = $before - $kept.Count
+    # Always write, even for a full clear, so recent.json is a valid empty array.
+    $json = if ($kept.Count -eq 0) { '[]' } else { $kept | ConvertTo-Json -Depth 4 }
+    if ($kept.Count -eq 1 -and $json -notmatch '^\s*\[') { $json = "[$json]" }
+    Set-Content -Path $path -Value $json -Encoding UTF8
+    Log-Info ("recent cleared: removed=$removed" + $(if ($PSBoundParameters.ContainsKey('OlderThan')) { " (older than $($OlderThan.ToString('o')))" } else { ' (all)' }))
+    return $removed
+}
+
 # ---------- Worker tick ---------------------------------------------------
 # Call from a timer (e.g. tray's Timer.Tick). Idempotent, cheap, safe to
 # call every second.
@@ -254,8 +314,13 @@ function Invoke-QueueTick {
             Remove-Job -Id $j.JobId -Force -ErrorAction SilentlyContinue
             $j.JobId  = $null
 
-            # Fire completion side-effects
-            Append-Recent $j
+            # Fire completion side-effects.
+            # PRIVACY: sensitive downloads are NEVER appended to Recent
+            # (the whole point is to leave no history trail). User can still
+            # re-download by pasting the URL again.
+            if (-not [bool]$j.Sensitive) {
+                Append-Recent $j
+            }
             if ($j.Status -eq 'done') {
                 Send-Toast 'Grab complete' "$($j.FilesAdded) file(s) from $(Get-SiteName $j.Url)"
             } else {

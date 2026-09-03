@@ -44,6 +44,25 @@ function Invoke-YtDlp([string]$url, [string]$dest, [bool]$useCookies, [string]$b
         '--retries','5',
         '--download-archive', $archive
     )
+
+    # --- Video-quality mapping (config.videoQuality) -----------------------
+    # 'best'  -> no --format flag; yt-dlp picks the best mux itself.
+    # NNNNp   -> cap height at NNNN, fall back to next-best if unavailable.
+    # 'audio' -> best audio only, extracted to mp3 for portability.
+    # Falls through to 'best' on any unknown value (older configs stay safe).
+    $cfg = Get-Config
+    $q = if ($cfg.videoQuality) { [string]$cfg.videoQuality } else { 'best' }
+    switch ($q) {
+        'best'  { }
+        '2160p' { $args += @('--format', 'bv*[height<=2160]+ba/b[height<=2160]/best') }
+        '1440p' { $args += @('--format', 'bv*[height<=1440]+ba/b[height<=1440]/best') }
+        '1080p' { $args += @('--format', 'bv*[height<=1080]+ba/b[height<=1080]/best') }
+        '720p'  { $args += @('--format', 'bv*[height<=720]+ba/b[height<=720]/best') }
+        '480p'  { $args += @('--format', 'bv*[height<=480]+ba/b[height<=480]/best') }
+        'audio' { $args += @('--format', 'bestaudio/best', '-x', '--audio-format', 'mp3') }
+        default { }  # unknown -> yt-dlp default
+    }
+
     if ($useCookies -and $browser -and $browser -ne 'none') { $args += @('--cookies-from-browser', $browser) }
     $args += $url
     & $tool @args 2>&1 | ForEach-Object { $_ }
@@ -211,6 +230,13 @@ function Invoke-Grab {
             Invoke-PostProcess -Url $Url -Dest $Dest -Tool $result.Tool -FilesAdded $result.FilesAdded -StartedAt $grabStartedAt.AddSeconds(-5)
         } catch {
             Log-Warn "post-process failed (non-fatal): $($_.Exception.Message)"
+        }
+        # Sensitive: hide everything the download just landed. Done AFTER the
+        # engines write (so they see plain-attr paths) and idempotent.
+        if ($isSensitive -and $privatePath -and (Test-Path -LiteralPath $privatePath)) {
+            try { Set-FolderHidden $privatePath -Recurse } catch {
+                Log-Warn "sensitive-hide failed (non-fatal): $($_.Exception.Message)"
+            }
         }
     }
 

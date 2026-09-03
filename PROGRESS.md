@@ -4,6 +4,37 @@ Version history and checkpoint notes. Latest at the top.
 
 ---
 
+## v0.1.2 · 2026-09-02 · Polish pass (video quality, wrapping labels, dark About)
+
+Small three-item polish. Kept the current dark theme + warm gradient accent (`#F5A87A` -> `#E85F62`) untouched; new design language is being decided separately in another conversation.
+
+**Changes**
+- **Video quality picker.** New `videoQuality` config key (`best` / `2160p` / `1440p` / `1080p` / `720p` / `480p` / `audio`, default `best`). Back-filled onto legacy configs. Wired into `Invoke-YtDlp` as a `--format` mapping (yt-dlp only; `Invoke-GalleryDl` untouched). New **VIDEO** section in Settings (ComboBox between COOKIES and NOTIFICATIONS) with caption "Falls back to next-best if the exact resolution isn't available."
+- **Settings label wrapping.** Added `TextWrapping="Wrap"` to the `FieldLabel` style and introduced a `Caption` style with wrapping. Fixes the SAFETY/PRIVACY blurb ("Sensitive downloads route into a hidden .private/ folder…") getting cut off at `MinWidth=440` -- no window widening.
+- **Dark About dialog.** Replaced the ugly `[System.Windows.Forms.MessageBox]::Show(...)` call in `src/tray.ps1` with an inline WPF `Show-AboutWindow` (380x260, dark card `#111114`, rounded 14px corners, drop shadow, gradient dot + "grab" wordmark, drag-to-move, gradient OK button matching popup). Placeholder body copy in place until finalized.
+
+**Tests added (5)**
+1. `Get-Config back-fills videoQuality with default "best"`
+2. `Get-Config back-fills videoQuality on legacy configs that lack the key`
+3. `Invoke-YtDlp has a --format branch for every documented quality tier` (static-scan for each of the 7 mappings)
+4. `settings.xaml has the VideoQuality combobox with all 7 options`
+5. `settings.xaml SAFETY/PRIVACY description wraps` (static-scan for `TextWrapping="Wrap"` on FieldLabel style or inline)
+6. `About handler in tray.ps1 no longer uses WinForms MessageBox`
+
+**Test count:** 150 / 150 pass (was 144).
+
+**Files touched**
+- `src/utils.ps1` -- default + back-fill for `videoQuality`
+- `src/core.ps1` -- `Invoke-YtDlp` reads `$cfg.videoQuality` and maps to `--format`
+- `src/settings.ps1` -- `VideoQuality` control load / save / reset
+- `src/tray.ps1` -- `Show-AboutWindow` (inline WPF) replaces MessageBox
+- `ui/settings.xaml` -- new VIDEO section, wrapping FieldLabel + Caption styles
+- `tests/smoke.ps1` -- 6 new tests in a `v0.1.2 polish` section
+
+No new files created (About XAML lives inline in `tray.ps1`), so `docs/file-map.md` unchanged.
+
+---
+
 ## v0.1.0 · 2026-09-02 · Foundation (in progress)
 
 **Phase 2a / 2b build kickoff.** Restarted from previous script prototypes (`imadjinn-grab.ps1`, popup, drop shortcuts) after UX audit surfaced the need for a proper tray app, batch handling, non-intrusive popup, portable install.

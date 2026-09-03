@@ -8,338 +8,487 @@
         ShowInTaskbar="True"
         WindowStartupLocation="Manual"
         ResizeMode="CanResizeWithGrip"
-        MinWidth="380" MinHeight="340"
+        MinWidth="380" MaxWidth="520" MinHeight="360"
         UseLayoutRounding="True"
         SnapsToDevicePixels="True">
 
+  <!--
+    Arcade + Silkscreen + VHS (mockup-matched v0.2.2)
+    ==================================================
+    Ground:  #0A0616  Card: #141024  Card-hi: #1F1738  Line: #241A3E
+    Accent:  #FF2D8C (hot pink)   Cyan: #00E5D2  Amber: #FFD447
+    Green:   #8DFF6B  Magenta: #FF2E93  REC: #FF4444
+    Ink:     #F5EBD0 (warm cream, was cool white)   Muted: #8974A6
+    Silkscreen = wordmark + micro-uppercase ONLY (never body/paragraphs).
+    VT323 = terminal-ish tab labels, kicker text, footer, monospace site names.
+    Inter = readable body / form controls / paragraphs.
+    __GRAB_FONTS__ token is substituted at load time with the file:/// URI
+    of assets/fonts/. Tests load raw XAML; WPF FontFamily silently falls
+    back if the URI is unresolved (so the raw file still parses cleanly).
+    __GRAB_THEME__ token is substituted at load time with the file:/// URI
+    of ui/theme.xaml (the shared arcade design system). Tests substitute
+    both tokens before parsing.
+    __GRAB_ASSETS__ token is substituted with the file:/// URI of assets/.
+  -->
+
   <Window.Resources>
-    <!-- Palette -->
-    <SolidColorBrush x:Key="Bg"          Color="#111114"/>
-    <SolidColorBrush x:Key="BgSoft"      Color="#1A1A1D"/>
-    <SolidColorBrush x:Key="BorderSoft"  Color="#26262A"/>
-    <SolidColorBrush x:Key="BorderInput" Color="#2A2A2E"/>
-    <SolidColorBrush x:Key="Text"        Color="#F5F5F7"/>
-    <SolidColorBrush x:Key="TextMuted"   Color="#8E8E93"/>
-    <SolidColorBrush x:Key="TextDim"     Color="#5E5E63"/>
-    <SolidColorBrush x:Key="Hover"       Color="#1F1F23"/>
-    <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1">
-      <GradientStop Color="#F5A87A" Offset="0"/>
-      <GradientStop Color="#E85F62" Offset="1"/>
-    </LinearGradientBrush>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="__GRAB_THEME__"/>
+      </ResourceDictionary.MergedDictionaries>
 
-    <!-- Icon button (title bar min/close) -->
-    <Style x:Key="IconBtn" TargetType="Button">
-      <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
-      <Setter Property="FontSize" Value="14"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Width" Value="30"/>
-      <Setter Property="Height" Value="26"/>
-      <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="6" Background="Transparent">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Hover}"/>
-                <Setter Property="Foreground" Value="{StaticResource Text}"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
+      <!-- Local styles: popup-specific title-bar icon buttons + tab strip
+           overrides live inline. Everything else (ArcadeCombo, ArcadeText,
+           ArcadeCheck, ArcadeGhost, ArcadePrimary...) comes from theme.xaml. -->
 
-    <!-- Close (× - want a red hover) -->
-    <Style x:Key="CloseBtn" TargetType="Button" BasedOn="{StaticResource IconBtn}">
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="6" Background="Transparent">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#8A2A2A"/>
-                <Setter Property="Foreground" Value="White"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
+      <!-- Legacy gradient key kept so any dynamic row XAML that still uses
+           StaticResource="AccentGradient" resolves after theme merge. -->
+      <SolidColorBrush x:Key="AccentGradient" Color="#FF2D8C"/>
 
-    <!-- Tab button -->
-    <Style x:Key="TabBtn" TargetType="Button">
-      <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
-      <Setter Property="FontSize" Value="13"/>
-      <Setter Property="FontWeight" Value="Medium"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Height" Value="34"/>
-      <Setter Property="Padding" Value="16,0"/>
-      <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Grid>
-              <ContentPresenter x:Name="CP" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
-              <Border x:Name="Under" Height="2" VerticalAlignment="Bottom" Margin="10,0" Background="Transparent" CornerRadius="1"/>
-            </Grid>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource Text}"/>
-              </Trigger>
-              <Trigger Property="Tag" Value="active">
-                <Setter Property="Foreground" Value="{StaticResource Text}"/>
-                <Setter TargetName="Under" Property="Background" Value="{StaticResource Accent}"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
+      <!-- Icon button (title bar min/close) -->
+      <Style x:Key="IconBtn" TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="FontFamily" Value="__GRAB_FONTS__#Silkscreen"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Width" Value="30"/>
+        <Setter Property="Height" Value="26"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="Bd" CornerRadius="4" Background="Transparent">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="Bd" Property="Background" Value="{StaticResource Hover}"/>
+                  <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
 
-    <!-- Primary button (gradient) -->
-    <Style x:Key="PrimaryBtn" TargetType="Button">
-      <Setter Property="Foreground" Value="White"/>
-      <Setter Property="FontSize" Value="13"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Height" Value="38"/>
-      <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="9" Background="{StaticResource Accent}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20,0"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.9"/>
-              </Trigger>
-              <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.75"/>
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
+      <!-- Close: same as IconBtn but hovers to red -->
+      <Style x:Key="CloseBtn" TargetType="Button" BasedOn="{StaticResource IconBtn}">
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <Border x:Name="Bd" CornerRadius="4" Background="Transparent">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="Bd" Property="Background" Value="{StaticResource Rec}"/>
+                  <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
 
-    <!-- Ghost button -->
-    <Style x:Key="GhostBtn" TargetType="Button">
-      <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
-      <Setter Property="FontSize" Value="12"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Height" Value="34"/>
-      <Setter Property="Padding" Value="12,0"/>
-      <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="8" Background="Transparent">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Hover}"/>
-                <Setter Property="Foreground" Value="{StaticResource Text}"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
+      <!-- Sensitive/private checkbox: minimal, VT323 label. Kept local
+           because it uses a smaller (14px) VT323 label and muted text
+           color, different from the ArcadeCheck default. -->
+      <Style x:Key="MonoCheck" TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+        <Setter Property="FontFamily" Value="__GRAB_FONTS__#VT323"/>
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="CheckBox">
+              <StackPanel Orientation="Horizontal">
+                <Border x:Name="Box" Width="16" Height="16" CornerRadius="0"
+                        Background="{StaticResource CardHi}"
+                        BorderBrush="{StaticResource Cyan}" BorderThickness="1"
+                        VerticalAlignment="Center">
+                  <TextBlock x:Name="Tick" Text="&#9642;" Foreground="{StaticResource Accent}"
+                             FontSize="14" FontWeight="Bold"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                             Visibility="Collapsed"/>
+                </Border>
+                <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
+              </StackPanel>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Tick" Property="Visibility" Value="Visible"/>
+                  <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                </Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True">
+                  <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+    </ResourceDictionary>
   </Window.Resources>
 
-  <!-- Outer border: rounded, dark, drop shadow -->
-  <Border CornerRadius="14"
-          Background="{StaticResource Bg}"
-          BorderBrush="{StaticResource BorderSoft}"
-          BorderThickness="1"
-          Margin="14">
-    <Border.Effect>
-      <DropShadowEffect Color="Black" BlurRadius="24" ShadowDepth="0" Opacity="0.55"/>
-    </Border.Effect>
+  <!-- Outer container: Grid so the scanlines + vignette overlays can sit on
+       top of the card via Panel.ZIndex without disturbing the card layout. -->
+  <Grid Margin="14">
 
-    <Grid>
-      <Grid.RowDefinitions>
-        <RowDefinition Height="44"/>   <!-- title bar -->
-        <RowDefinition Height="40"/>   <!-- tab strip -->
-        <RowDefinition Height="*"/>    <!-- tab content -->
-      </Grid.RowDefinitions>
+    <!-- Outer card: mockup radius 14 + inset pink halo emulated with a nested
+         Border whose BorderBrush #26FF2E93 (alpha=0x26 = ~15%) rims the inner
+         content with a subtle pink hue that reads as an inset glow. WPF has
+         no native inset-shadow support on Border. -->
+    <Border CornerRadius="14"
+            Background="{StaticResource Ground}"
+            BorderBrush="{StaticResource BorderSoft}"
+            BorderThickness="1">
+      <Border.Effect>
+        <DropShadowEffect Color="Black" BlurRadius="60" ShadowDepth="30" Opacity="0.5"/>
+      </Border.Effect>
 
-      <!-- ===== Title bar =====
-           Background="#01000000" is nearly-transparent BUT guaranteed
-           hit-testable so MouseLeftButtonDown fires anywhere on the bar
-           (drag-to-move). "Transparent" also works in theory but is
-           less reliable across WPF versions. -->
-      <Grid Grid.Row="0" x:Name="TitleBar" Background="#01000000" Margin="12,0,4,0">
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <Ellipse Width="10" Height="10" Fill="{StaticResource Accent}" VerticalAlignment="Center"/>
-          <TextBlock Text="grab"
-                     FontFamily="Segoe UI Variable Display, Segoe UI"
-                     FontSize="16" FontWeight="SemiBold"
-                     Foreground="{StaticResource Text}"
-                     Margin="10,0,0,0"
-                     VerticalAlignment="Center"/>
-        </StackPanel>
-        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-          <Button x:Name="MinBtn"   Style="{StaticResource IconBtn}"  Content="&#8211;"/>
-          <Button x:Name="CloseBtn" Style="{StaticResource CloseBtn}" Content="&#215;" Margin="4,0,0,0"/>
-        </StackPanel>
-      </Grid>
+      <Border x:Name="InsetGlow"
+              CornerRadius="14"
+              BorderThickness="1"
+              BorderBrush="#0DFF2E93"
+              ClipToBounds="True">
 
-      <!-- ===== Tab strip ===== -->
-      <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="8,0" VerticalAlignment="Center">
-        <Button x:Name="TabPaste"  Style="{StaticResource TabBtn}" Content="Paste"  Tag="active"/>
-        <Button x:Name="TabQueue"  Style="{StaticResource TabBtn}" Content="Queue"/>
-        <Button x:Name="TabRecent" Style="{StaticResource TabBtn}" Content="Recent"/>
-      </StackPanel>
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="40"/>   <!-- title bar -->
+          <RowDefinition Height="36"/>   <!-- tab strip -->
+          <RowDefinition Height="*"/>    <!-- tab content -->
+          <RowDefinition Height="Auto"/> <!-- footer status bar -->
+        </Grid.RowDefinitions>
 
-      <!-- ===== Tab content ===== -->
-      <Grid Grid.Row="2" Margin="20,10,20,20">
-        <!-- Paste tab -->
-        <Grid x:Name="PastePanel">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-          </Grid.RowDefinitions>
+        <!-- ===== Title bar =====
+             #01000000 background is nearly-transparent BUT hit-testable so the
+             whole bar drags the window. Layout:
+               [ REC dot w/ red glow ]      [ GRAB wordmark, 4-layer stack ]      [ _ X ]
+        -->
+        <Grid Grid.Row="0" x:Name="TitleBar" Background="#01000000" Margin="12,0,4,0">
+          <!-- Left: pulsing REC dot with red glow (DropShadowEffect) -->
+          <Ellipse x:Name="RecDot" Width="12" Height="12" Fill="{StaticResource Rec}"
+                   HorizontalAlignment="Left" VerticalAlignment="Center">
+            <Ellipse.Effect>
+              <DropShadowEffect Color="#FF4444" BlurRadius="12" ShadowDepth="0" Opacity="0.9"/>
+            </Ellipse.Effect>
+            <Ellipse.Triggers>
+              <EventTrigger RoutedEvent="Ellipse.Loaded">
+                <BeginStoryboard>
+                  <Storyboard RepeatBehavior="Forever">
+                    <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                     From="1.0" To="0.4" Duration="0:0:0.8" AutoReverse="True"/>
+                  </Storyboard>
+                </BeginStoryboard>
+              </EventTrigger>
+            </Ellipse.Triggers>
+          </Ellipse>
 
-          <TextBlock Grid.Row="0"
-                     Text="Paste any link. We'll figure out the rest."
-                     FontFamily="Segoe UI Variable Text, Segoe UI"
-                     FontSize="13"
-                     Foreground="{StaticResource TextMuted}"/>
-
-          <!-- Single-line input (visible by default) -->
-          <Border Grid.Row="1"
-                  x:Name="SingleInputBorder"
-                  CornerRadius="10"
-                  Background="{StaticResource BgSoft}"
-                  BorderBrush="{StaticResource BorderInput}"
-                  BorderThickness="1"
-                  Margin="0,14,0,0">
-            <TextBox x:Name="UrlBox"
-                     Background="Transparent"
-                     BorderThickness="0"
-                     Foreground="{StaticResource Text}"
-                     CaretBrush="#F5A87A"
-                     SelectionBrush="#F5A87A"
-                     SelectionOpacity="0.35"
-                     FontSize="13"
-                     FontFamily="Consolas, Segoe UI"
-                     Padding="16,13"
-                     VerticalContentAlignment="Center"/>
-          </Border>
-
-          <!-- Multi-line input (hidden by default) -->
-          <Border Grid.Row="1"
-                  x:Name="MultiInputBorder"
-                  CornerRadius="10"
-                  Background="{StaticResource BgSoft}"
-                  BorderBrush="{StaticResource BorderInput}"
-                  BorderThickness="1"
-                  Margin="0,14,0,0"
-                  Visibility="Collapsed">
-            <TextBox x:Name="MultiBox"
-                     Background="Transparent"
-                     BorderThickness="0"
-                     Foreground="{StaticResource Text}"
-                     CaretBrush="#F5A87A"
-                     SelectionBrush="#F5A87A"
-                     SelectionOpacity="0.35"
-                     FontSize="13"
-                     FontFamily="Consolas, Segoe UI"
-                     Padding="16,10"
-                     AcceptsReturn="True"
-                     TextWrapping="Wrap"
-                     Height="140"
-                     VerticalScrollBarVisibility="Auto"/>
-          </Border>
-
-          <TextBlock Grid.Row="2"
-                     x:Name="Hint"
-                     FontSize="11"
-                     Foreground="{StaticResource TextDim}"
-                     Margin="4,10,0,0"/>
-
-          <!-- Actions row -->
-          <Grid Grid.Row="4" Margin="0,16,0,0">
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-              <Button x:Name="ToggleMulti"
-                      Style="{StaticResource GhostBtn}"
-                      Content="Add many..."/>
-              <CheckBox x:Name="SensitiveToggle"
-                        Content="&#128274; Sensitive"
-                        ToolTip="Route this download to a hidden .private folder"
-                        Foreground="#8E8E93"
-                        FontSize="11"
-                        VerticalAlignment="Center"
-                        Margin="12,0,0,0"
-                        Cursor="Hand"/>
-            </StackPanel>
-            <Button x:Name="GrabBtn"
-                    Style="{StaticResource PrimaryBtn}"
-                    Content="Grab it"
-                    Width="120"
-                    HorizontalAlignment="Right"/>
+          <!-- Center: GRAB wordmark, 4-layer VHS + amber-halo stack.
+               Layer 1 (bottom): transparent text + BIG amber DropShadowEffect
+                                 (this IS the amber halo behind the letters).
+               Layer 2: cyan behind-left (-1.5)
+               Layer 3: pink behind-right (+1.5)
+               Layer 4 (top): cream #F5EBD0 (was #F4F0FF pre-v0.2.2)
+               CharacterSpacing 180 (0.18em) matches mockup letter-spacing.  -->
+          <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Width="150" Height="30">
+            <!-- Amber halo (transparent foreground so only its blur shows) -->
+            <TextBlock Text="GRAB" FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="22"
+                       Foreground="Transparent" TextOptions.TextRenderingMode="Aliased"
+                       HorizontalAlignment="Center" VerticalAlignment="Center">
+              <TextBlock.Effect>
+                <DropShadowEffect Color="#FFD447" BlurRadius="20" ShadowDepth="0" Opacity="0.55"/>
+              </TextBlock.Effect>
+            </TextBlock>
+            <TextBlock Text="GRAB" FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="22"
+                       Foreground="{StaticResource Cyan}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Margin="-3,0,0,0" Opacity="0.85"/>
+            <TextBlock Text="GRAB" FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="22"
+                       Foreground="{StaticResource Accent}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Margin="3,0,0,0" Opacity="0.85"/>
+            <TextBlock Text="GRAB" FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="22"
+                       Foreground="{StaticResource Text}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Grid>
 
-          <TextBlock Grid.Row="5"
-                     x:Name="StatusLine"
-                     FontSize="11"
-                     Foreground="{StaticResource TextDim}"
-                     Margin="4,12,0,0"
-                     TextWrapping="Wrap"/>
-        </Grid>
-
-        <!-- Queue tab -->
-        <Grid x:Name="QueuePanel" Visibility="Collapsed">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-          </Grid.RowDefinitions>
-          <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel x:Name="QueueList" Margin="0,0,4,0"/>
-          </ScrollViewer>
-          <TextBlock Grid.Row="0"
-                     x:Name="QueueEmpty"
-                     Text="Nothing in the queue. Paste a link on the Paste tab."
-                     Foreground="{StaticResource TextMuted}"
-                     FontSize="12"
-                     HorizontalAlignment="Center" VerticalAlignment="Center"
-                     Visibility="Collapsed"/>
-          <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-            <Button x:Name="QueueClearDone" Style="{StaticResource GhostBtn}" Content="Clear finished"/>
+          <!-- Right: min + close, flat Silkscreen glyphs -->
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <Button x:Name="MinBtn"   Style="{StaticResource IconBtn}"  Content="_"/>
+            <Button x:Name="CloseBtn" Style="{StaticResource CloseBtn}" Content="X" Margin="4,0,0,0"/>
           </StackPanel>
         </Grid>
 
-        <!-- Recent tab -->
-        <Grid x:Name="RecentPanel" Visibility="Collapsed">
-          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel x:Name="RecentList" Margin="0,0,4,0"/>
-          </ScrollViewer>
-          <TextBlock x:Name="RecentEmpty"
-                     Text="No recent downloads yet."
-                     Foreground="{StaticResource TextMuted}"
-                     FontSize="12"
-                     HorizontalAlignment="Center" VerticalAlignment="Center"
-                     Visibility="Collapsed"/>
+        <!-- ===== Tab strip =====
+             Mockup active-state (v0.2.2): ALL active tabs use the same magenta
+             underline #FF2E93 + amber text with a soft amber glow (see the
+             ArcadeTab template in theme.xaml). The Tag values ("active-amber",
+             "active-cyan","active-green") are legacy naming kept so popup.ps1
+             tab-switch dispatch doesn't need a rewrite; they all resolve to
+             the same visual now. -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="14,0" VerticalAlignment="Center">
+          <Button x:Name="TabPaste"  Style="{StaticResource ArcadeTab}" Content="PASTE"  Tag="active-amber"/>
+          <Button x:Name="TabQueue"  Style="{StaticResource ArcadeTab}" Content="QUEUE"/>
+          <Button x:Name="TabRecent" Style="{StaticResource ArcadeTab}" Content="RECENT"/>
+        </StackPanel>
+
+        <!-- ===== Tab content ===== -->
+        <Grid Grid.Row="2" Margin="20,10,20,20">
+          <!-- Paste tab -->
+          <Grid x:Name="PastePanel">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Hint (mockup PART I): "Paste any link. We figure out the rest.
+                 [CTRL+V]" in VT323 15px muted, with [CTRL+V] in cyan #00E5D2.
+                 Runs give the two-tone inline styling without a StackPanel. -->
+            <TextBlock Grid.Row="0"
+                       x:Name="HintKicker"
+                       FontFamily="__GRAB_FONTS__#VT323" FontSize="15"
+                       Foreground="{StaticResource TextMuted}"
+                       TextWrapping="Wrap">
+              <Run Text="Paste any link. We figure out the rest. "/><Run Foreground="#00E5D2" FontWeight="Bold" Text="[CTRL+V]"/>
+            </TextBlock>
+
+            <!-- Single-line input (with blinking amber caret decoration to the
+                 right of the text, PART H1). -->
+            <Border Grid.Row="1"
+                    x:Name="SingleInputBorder"
+                    CornerRadius="6"
+                    Background="{StaticResource CardHi}"
+                    BorderBrush="{StaticResource BorderInput}"
+                    BorderThickness="1"
+                    Margin="0,12,0,0">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="UrlBox"
+                         Grid.Column="0"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Foreground="{StaticResource Text}"
+                         CaretBrush="#FF2D8C"
+                         SelectionBrush="#FF2D8C"
+                         SelectionOpacity="0.35"
+                         FontFamily="__GRAB_FONTS__#Inter"
+                         FontSize="13"
+                         Padding="14,12"
+                         VerticalContentAlignment="Center"/>
+                <!-- Amber blinking caret (PART H1). Sits inside the input row
+                     as a decorative sibling to the real TextBox. Hidden while
+                     the TextBox has keyboard focus (real caret takes over). -->
+                <Rectangle x:Name="AmberCaret"
+                           Grid.Column="1"
+                           Width="8" Height="14" Fill="#FFD447"
+                           VerticalAlignment="Center" Margin="0,0,10,0">
+                  <Rectangle.Triggers>
+                    <EventTrigger RoutedEvent="Rectangle.Loaded">
+                      <BeginStoryboard>
+                        <Storyboard RepeatBehavior="Forever">
+                          <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                           From="1" To="0" Duration="0:0:0.45" AutoReverse="True"/>
+                        </Storyboard>
+                      </BeginStoryboard>
+                    </EventTrigger>
+                  </Rectangle.Triggers>
+                </Rectangle>
+              </Grid>
+            </Border>
+
+            <!-- Multi-line input (hidden by default) -->
+            <Border Grid.Row="1"
+                    x:Name="MultiInputBorder"
+                    CornerRadius="6"
+                    Background="{StaticResource CardHi}"
+                    BorderBrush="{StaticResource BorderInput}"
+                    BorderThickness="1"
+                    Margin="0,12,0,0"
+                    Visibility="Collapsed">
+              <TextBox x:Name="MultiBox"
+                       Background="Transparent"
+                       BorderThickness="0"
+                       Foreground="{StaticResource Text}"
+                       CaretBrush="#FF2D8C"
+                       SelectionBrush="#FF2D8C"
+                       SelectionOpacity="0.35"
+                       FontFamily="__GRAB_FONTS__#Inter"
+                       FontSize="13"
+                       Padding="14,10"
+                       AcceptsReturn="True"
+                       TextWrapping="Wrap"
+                       Height="140"
+                       VerticalScrollBarVisibility="Auto"/>
+            </Border>
+
+            <TextBlock Grid.Row="2"
+                       x:Name="Hint"
+                       FontFamily="__GRAB_FONTS__#Inter"
+                       FontSize="11"
+                       Foreground="{StaticResource TextDim}"
+                       Margin="4,8,0,0"
+                       TextWrapping="Wrap"/>
+
+            <!-- Actions row -->
+            <Grid Grid.Row="4" Margin="0,14,0,0">
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                <!-- ADD MANY ghost: outline flips cyan->amber on hover (arcade) -->
+                <Button x:Name="ToggleMulti"
+                        Style="{StaticResource ArcadeGhost}"
+                        Content="ADD MANY"
+                        BorderBrush="{StaticResource Amber}"
+                        Foreground="{StaticResource Amber}"/>
+                <CheckBox x:Name="SensitiveToggle"
+                          Style="{StaticResource MonoCheck}"
+                          Content="&#128274; PRIVATE"
+                          ToolTip="Route this download to a hidden .private folder"
+                          VerticalAlignment="Center"
+                          Margin="14,0,0,0"/>
+              </StackPanel>
+              <Button x:Name="GrabBtn"
+                      Style="{StaticResource ArcadePrimary}"
+                      Content="GRAB IT"
+                      Width="130"
+                      HorizontalAlignment="Right"/>
+            </Grid>
+
+            <TextBlock Grid.Row="5"
+                       x:Name="StatusLine"
+                       FontFamily="__GRAB_FONTS__#Inter"
+                       FontSize="11"
+                       Foreground="{StaticResource TextDim}"
+                       Margin="4,10,0,0"
+                       TextWrapping="Wrap"/>
+          </Grid>
+
+          <!-- Queue tab -->
+          <Grid x:Name="QueuePanel" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel x:Name="QueueList" Margin="0,0,4,0"/>
+            </ScrollViewer>
+            <TextBlock Grid.Row="0"
+                       x:Name="QueueEmpty"
+                       FontFamily="__GRAB_FONTS__#VT323"
+                       Text="&#9656; QUEUE EMPTY. PASTE A LINK ON THE PASTE TAB."
+                       Foreground="{StaticResource TextMuted}"
+                       FontSize="14"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Visibility="Collapsed"/>
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+              <Button x:Name="QueueClearDone" Style="{StaticResource ArcadeGhost}" Content="CLEAR FINISHED"/>
+            </StackPanel>
+          </Grid>
+
+          <!-- Recent tab -->
+          <Grid x:Name="RecentPanel" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <StackPanel x:Name="RecentList" Margin="0,0,4,0"/>
+            </ScrollViewer>
+            <TextBlock Grid.Row="0"
+                       x:Name="RecentEmpty"
+                       FontFamily="__GRAB_FONTS__#VT323"
+                       Text="&#9656; NO RECENT DOWNLOADS YET."
+                       Foreground="{StaticResource TextMuted}"
+                       FontSize="14"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Visibility="Collapsed"/>
+            <!-- Purge actions: CLEAR OLDER (ghost, secondary) and CLEAR ALL
+                 (danger, destructive). Sensitive downloads never land here
+                 to begin with; these only touch recent.json (history), never
+                 the files on disk. -->
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+              <Button x:Name="ClearOldRecentBtn"
+                      Style="{StaticResource ArcadeGhost}"
+                      Content="CLEAR &gt; 30 DAYS"
+                      ToolTip="Remove entries older than 30 days from Recent (files on disk are untouched)"
+                      Margin="0,0,8,0"/>
+              <Button x:Name="ClearRecentBtn"
+                      Style="{StaticResource ArcadeDanger}"
+                      Content="&#128465; CLEAR ALL"
+                      ToolTip="Remove every entry from Recent (files on disk are untouched)"/>
+            </StackPanel>
+          </Grid>
         </Grid>
+
+        <!-- ===== Footer status bar (PART H2) =====
+             VT323 muted status text on the left, "by IMADJINN" credit on the
+             right with IMADJINN highlighted in Silkscreen amber. Top border
+             #241A3E separates the footer from the tab content. -->
+        <Border Grid.Row="3" BorderBrush="{StaticResource BorderSoft}" BorderThickness="0,1,0,0"
+                Padding="16,10,16,12" Background="Transparent">
+          <Grid>
+            <TextBlock x:Name="FooterStatus"
+                       FontFamily="__GRAB_FONTS__#VT323" FontSize="13"
+                       Foreground="{StaticResource TextMuted}"
+                       HorizontalAlignment="Left" VerticalAlignment="Center"
+                       Text="SYS: READY &#183; queue idle"/>
+            <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
+                       FontFamily="__GRAB_FONTS__#VT323" FontSize="13"
+                       Foreground="{StaticResource TextMuted}">
+              <Run Text="by "/><Run FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="10" Foreground="#FFD447" Text="IMADJINN"/>
+            </TextBlock>
+          </Grid>
+        </Border>
+
       </Grid>
-    </Grid>
-  </Border>
+      </Border>
+    </Border>
+
+    <!-- Radial vignette (PART F). Darkens the corners subtly to focus the
+         eye on the middle of the card. IsHitTestVisible=False so it doesn't
+         swallow clicks. ZIndex 998 keeps it under the scanlines. -->
+    <Rectangle IsHitTestVisible="False" Panel.ZIndex="998">
+      <Rectangle.Fill>
+        <RadialGradientBrush GradientOrigin="0.5,0.5" Center="0.5,0.5" RadiusX="0.85" RadiusY="0.85">
+          <GradientStop Offset="0.55" Color="Transparent"/>
+          <GradientStop Offset="1.0" Color="#88000000"/>
+        </RadialGradientBrush>
+      </Rectangle.Fill>
+    </Rectangle>
+
+    <!-- Static CRT scanlines overlay (Panel.ZIndex=999 puts it on top).
+         Toggled via config.crtScanlines through the ScanlinesOverlay named
+         control.
+         The previous tile-a-tiny-PNG approach (scanlines.png at 6% opacity)
+         was invisible at real DPI: absolute-units ImageBrush + 6% black on
+         an already-black ground = zero perceptible bands. Replaced with a
+         LinearGradientBrush using MappingMode="Absolute" + SpreadMethod=
+         "Repeat" for pixel-perfect 3-DIP scanline bands, and lightened the
+         "dark" band to white-alpha so the effect actually reads on the near-
+         black ground (dark-on-dark = you see nothing). Higher own-Opacity
+         keeps the effect subtle without needing a per-pixel PNG. -->
+    <Rectangle x:Name="ScanlinesOverlay"
+               IsHitTestVisible="False"
+               Panel.ZIndex="999"
+               Opacity="0.14">
+      <Rectangle.Fill>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="0,3"
+                             MappingMode="Absolute" SpreadMethod="Repeat">
+          <GradientStop Offset="0"    Color="#40FFFFFF"/>
+          <GradientStop Offset="0.5"  Color="#40FFFFFF"/>
+          <GradientStop Offset="0.5"  Color="#00000000"/>
+          <GradientStop Offset="1"    Color="#00000000"/>
+        </LinearGradientBrush>
+      </Rectangle.Fill>
+    </Rectangle>
+
+  </Grid>
 </Window>
