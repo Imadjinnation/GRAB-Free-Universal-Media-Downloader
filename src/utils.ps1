@@ -349,10 +349,25 @@ function Get-RuntimeThemeUri {
     )
     Ensure-AppData
     try {
+        $out = Join-Path $script:AppData '.runtime-theme.xaml'
+        # Fast path (audit P1-28): if the runtime file already exists AND is
+        # newer than the source theme.xaml, skip the read+substitute+write
+        # entirely. Source rarely changes between launches; content diff
+        # (below) is expensive per launch on cold FS. Only run the content
+        # check when mtime says the source WAS touched more recently.
+        if (Test-Path -LiteralPath $out) {
+            try {
+                $srcMtime = (Get-Item -LiteralPath $SourceThemePath).LastWriteTimeUtc
+                $outMtime = (Get-Item -LiteralPath $out).LastWriteTimeUtc
+                if ($outMtime -ge $srcMtime) {
+                    return 'file:///' + (($out -replace '\\','/'))
+                }
+            } catch {}
+        }
         $raw = Get-Content -LiteralPath $SourceThemePath -Raw -Encoding UTF8
         $sub = $raw.Replace('__GRAB_FONTS__', $FontsUri)
-        $out = Join-Path $script:AppData '.runtime-theme.xaml'
-        # Write only when different -- avoids touching mtime every launch.
+        # Write only when different -- avoids touching mtime every launch even
+        # when the source WAS newer but with a compatible substitution result.
         $needWrite = $true
         if (Test-Path -LiteralPath $out) {
             try {
@@ -416,10 +431,57 @@ function Resolve-Tool([string]$name) {
 }
 
 # ---------- Logging -------------------------------------------------------
+# Rotation policy (audit P1-23):
+#   - Per-day file grab-YYYY-MM-DD.log; if today's file exceeds 5MB, rotate
+#     to .1 (deleting any prior .1 first). Two files per day is the cap.
+#   - Log folder is pruned to the newest 30 daily files. Older ones are
+#     deleted. Rotated .1 files count as one file each.
+# Rotation is best-effort: any failure logs to stderr but never blocks the
+# actual Add-Content write below. That guarantees log capture never gets
+# lost to a rotation edge case.
+
+$script:LogMaxBytes    = 5MB
+$script:LogKeepDays    = 30
+$script:LogRotateCheck = 0     # last tick counter; rotates every 20 writes
+
+function _RotateLogIfNeeded([string]$file) {
+    try {
+        if (Test-Path -LiteralPath $file) {
+            $len = (Get-Item -LiteralPath $file -ErrorAction Stop).Length
+            if ($len -ge $script:LogMaxBytes) {
+                $rot = "$file.1"
+                if (Test-Path -LiteralPath $rot) {
+                    Remove-Item -LiteralPath $rot -Force -ErrorAction SilentlyContinue
+                }
+                Move-Item -LiteralPath $file -Destination $rot -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+}
+
+function _PruneOldLogs {
+    try {
+        $files = Get-ChildItem -LiteralPath $script:LogFolder -Filter 'grab-*.log*' -File -ErrorAction SilentlyContinue |
+                 Sort-Object -Property LastWriteTimeUtc -Descending
+        if ($files.Count -gt $script:LogKeepDays) {
+            $files | Select-Object -Skip $script:LogKeepDays | ForEach-Object {
+                try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+    } catch {}
+}
 
 function Write-Log([string]$level, [string]$msg) {
     Ensure-AppData
     $file = Join-Path $script:LogFolder ("grab-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
+    # Both rotation checks are bucketed off a single mod-N counter so the
+    # hot path (log-a-line) stays close to just Add-Content. Rotate every
+    # 50 writes; prune every 200. Both are best-effort and never block the
+    # actual log append below. At worst, a rotation is delayed by <50 lines
+    # which is trivial compared to the 5MB threshold.
+    $script:LogRotateCheck = ($script:LogRotateCheck + 1) % 200
+    if (($script:LogRotateCheck % 50) -eq 0) { _RotateLogIfNeeded $file }
+    if ($script:LogRotateCheck -eq 0)         { _PruneOldLogs }
     $stamp = Get-Date -Format 'HH:mm:ss'
     # Redact tokens / auth params from URLs before they hit the log (audit low-19).
     $sanitized = $msg -replace '([?&](?:token|auth|password|api_key|apikey|sig|signature)=)[^&\s]+','${1}REDACTED'

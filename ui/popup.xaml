@@ -1,11 +1,12 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="grab"
+        Icon="__GRAB_ASSETS__/icon.ico"
         Width="480" Height="420"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
-        ShowInTaskbar="True"
+        ShowInTaskbar="False"
         WindowStartupLocation="Manual"
         ResizeMode="CanResizeWithGrip"
         MinWidth="380" MaxWidth="520" MinHeight="360"
@@ -168,22 +169,16 @@
                [ REC dot w/ red glow ]      [ GRAB wordmark, 4-layer stack ]      [ _ X ]
         -->
         <Grid Grid.Row="0" x:Name="TitleBar" Background="#01000000" Margin="12,0,4,0">
-          <!-- Left: pulsing REC dot with red glow (DropShadowEffect) -->
+          <!-- Left: pulsing REC dot with red glow (DropShadowEffect).
+               Pulse animation is now driven programmatically from popup.ps1
+               so it pauses when the popup is hidden (audit P1-27: previously
+               a Loaded EventTrigger + Forever Storyboard kept the animation
+               timer ticking while the window sat off-screen). -->
           <Ellipse x:Name="RecDot" Width="12" Height="12" Fill="{StaticResource Rec}"
                    HorizontalAlignment="Left" VerticalAlignment="Center">
             <Ellipse.Effect>
               <DropShadowEffect Color="#FF4444" BlurRadius="12" ShadowDepth="0" Opacity="0.9"/>
             </Ellipse.Effect>
-            <Ellipse.Triggers>
-              <EventTrigger RoutedEvent="Ellipse.Loaded">
-                <BeginStoryboard>
-                  <Storyboard RepeatBehavior="Forever">
-                    <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                     From="1.0" To="0.4" Duration="0:0:0.8" AutoReverse="True"/>
-                  </Storyboard>
-                </BeginStoryboard>
-              </EventTrigger>
-            </Ellipse.Triggers>
           </Ellipse>
 
           <!-- Center: GRAB wordmark, 4-layer VHS + amber-halo stack.
@@ -287,22 +282,15 @@
                          VerticalContentAlignment="Center"/>
                 <!-- Amber blinking caret (PART H1). Sits inside the input row
                      as a decorative sibling to the real TextBox. Hidden while
-                     the TextBox has keyboard focus (real caret takes over). -->
+                     the TextBox has keyboard focus (real caret takes over).
+                     The blink animation is driven from popup.ps1's window-
+                     visibility handler so it stops when the popup is hidden
+                     (audit P1-27: previously a Loaded Storyboard kept the
+                     animation timer ticking off-screen). -->
                 <Rectangle x:Name="AmberCaret"
                            Grid.Column="1"
                            Width="8" Height="14" Fill="#FFD447"
-                           VerticalAlignment="Center" Margin="0,0,10,0">
-                  <Rectangle.Triggers>
-                    <EventTrigger RoutedEvent="Rectangle.Loaded">
-                      <BeginStoryboard>
-                        <Storyboard RepeatBehavior="Forever">
-                          <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                           From="1" To="0" Duration="0:0:0.45" AutoReverse="True"/>
-                        </Storyboard>
-                      </BeginStoryboard>
-                    </EventTrigger>
-                  </Rectangle.Triggers>
-                </Rectangle>
+                           VerticalAlignment="Center" Margin="0,0,10,0"/>
               </Grid>
             </Border>
 
@@ -348,12 +336,20 @@
                         Content="ADD MANY"
                         BorderBrush="{StaticResource Amber}"
                         Foreground="{StaticResource Amber}"/>
+                <!-- Content uses inline Runs so the lock emoji (U+1F512) can
+                     opt into the Segoe UI Emoji / Segoe UI Symbol / Arial
+                     Unicode MS fallback stack while the "PRIVATE" text keeps
+                     the MonoCheck default font. Prevents tofu boxes when the
+                     bundled font has no emoji glyph (audit P1-16). -->
                 <CheckBox x:Name="SensitiveToggle"
                           Style="{StaticResource MonoCheck}"
-                          Content="&#128274; PRIVATE"
                           ToolTip="Route this download to a hidden .private folder"
                           VerticalAlignment="Center"
-                          Margin="14,0,0,0"/>
+                          Margin="14,0,0,0">
+                  <TextBlock>
+                    <Run FontFamily="Segoe UI Emoji, Segoe UI Symbol, Arial Unicode MS" Text="&#128274;"/><Run Text=" PRIVATE"/>
+                  </TextBlock>
+                </CheckBox>
               </StackPanel>
               <Button x:Name="GrabBtn"
                       Style="{StaticResource ArcadePrimary}"
@@ -420,10 +416,16 @@
                       Content="CLEAR &gt; 30 DAYS"
                       ToolTip="Remove entries older than 30 days from Recent (files on disk are untouched)"
                       Margin="0,0,8,0"/>
+              <!-- Trash emoji (U+1F5D1) wrapped in an emoji-font Run so it
+                   renders as a glyph, not tofu, on machines without a font
+                   that carries the codepoint (audit P1-17). -->
               <Button x:Name="ClearRecentBtn"
                       Style="{StaticResource ArcadeDanger}"
-                      Content="&#128465; CLEAR ALL"
-                      ToolTip="Remove every entry from Recent (files on disk are untouched)"/>
+                      ToolTip="Remove every entry from Recent (files on disk are untouched)">
+                <TextBlock>
+                  <Run FontFamily="Segoe UI Emoji, Segoe UI Symbol, Arial Unicode MS" Text="&#128465;"/><Run Text=" CLEAR ALL"/>
+                </TextBlock>
+              </Button>
             </StackPanel>
           </Grid>
         </Grid>

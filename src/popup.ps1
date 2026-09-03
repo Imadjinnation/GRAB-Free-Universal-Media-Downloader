@@ -295,11 +295,21 @@ function Load-PopupWindow {
         -FontsUri  (_GrabFontsUri) `
         -ThemeUri  (_GrabThemeUri) `
         -AssetsUri (_GrabAssetsUri)
-    $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+    # XamlReader.Parse can throw XamlParseException on malformed XAML; the
+    # exception used to bubble out of Show-Popup and kill the tray's WPF
+    # pump (audit P1-15). Now we catch, toast, and return $null so the tray
+    # keeps running while a diagnostic sits in the log.
+    try {
+        $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+    } catch {
+        Log-Err "popup XAML parse failed: $($_.Exception.Message)"
+        try { Send-Toast 'grab UI failed to load' 'Check the log' } catch {}
+        return $null
+    }
 
     # Named element handles
     $ctl = @{}
-    foreach ($n in @('TitleBar','MinBtn','CloseBtn',
+    foreach ($n in @('TitleBar','MinBtn','CloseBtn','RecDot',
                      'TabPaste','TabQueue','TabRecent',
                      'PastePanel','QueuePanel','RecentPanel',
                      'UrlBox','MultiBox','SingleInputBorder','MultiInputBorder',
@@ -453,14 +463,37 @@ function Load-PopupWindow {
     # ---------- Queue + Recent tabs: live-refresh timer ------------------
     # Rebuilds QueueList and RecentList children from disk state every 2s.
     # Uses WPF DispatcherTimer so it stops naturally when the popup hides.
+    #
+    # Diff-hash short-circuit (audit P1-21): pre-v0.3.0, every tick blindly
+    # Clear()ed the StackPanel and rebuilt every row, which visibly flickered
+    # AND reset the scroll position mid-read. Now we hash the JSON serialization
+    # of what would be rendered and skip the rebuild when nothing has changed
+    # since the last tick. First tick always renders (LastQueueHash starts null).
+    $LastQueueHashRef  = [ref]$null
+    $LastRecentHashRef = [ref]$null
+
     $renderQueue = {
         $q = @(Read-Queue) | Sort-Object -Property AddedAt -Descending
-        $CtlLocal.QueueList.Children.Clear()
         # Refresh the footer status text (PART H2). Uses helper so any caller
-        # can force-update the footer without knowing the queue schema.
+        # can force-update the footer without knowing the queue schema. Cheap;
+        # done every tick regardless of diff-hash result.
         if ($CtlLocal.FooterStatus) {
             try { $CtlLocal.FooterStatus.Text = Get-QueueStatusText } catch {}
         }
+        # Hash a JSON snapshot of the fields we actually render (Id, Status,
+        # StatusMsg, ToolUsed) so cosmetic churn on unrendered fields doesn't
+        # invalidate the cache. MD5 is fine here (collision resistance
+        # irrelevant; just a fingerprint).
+        $projection = $q | Select-Object Id, Status, StatusMsg, Url, Sensitive
+        $json = if ($projection) { ($projection | ConvertTo-Json -Depth 3 -Compress) } else { '[]' }
+        $md5  = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            $hash  = [System.BitConverter]::ToString($md5.ComputeHash($bytes))
+        } finally { $md5.Dispose() }
+        if ($LastQueueHashRef.Value -eq $hash) { return }
+        $LastQueueHashRef.Value = $hash
+        $CtlLocal.QueueList.Children.Clear()
         if ($q.Count -eq 0) {
             $CtlLocal.QueueEmpty.Visibility = 'Visible'
             return
@@ -473,6 +506,17 @@ function Load-PopupWindow {
 
     $renderRecent = {
         $r = @(Get-Recent)
+        # Hash the recent list so scroll position isn't reset every tick when
+        # nothing new has completed.
+        $projection = $r | Select-Object Url, Status, DoneAt, FilesAdded, ToolUsed
+        $json = if ($projection) { ($projection | ConvertTo-Json -Depth 3 -Compress) } else { '[]' }
+        $md5  = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            $hash  = [System.BitConverter]::ToString($md5.ComputeHash($bytes))
+        } finally { $md5.Dispose() }
+        if ($LastRecentHashRef.Value -eq $hash) { return }
+        $LastRecentHashRef.Value = $hash
         $CtlLocal.RecentList.Children.Clear()
         if ($r.Count -eq 0) {
             $CtlLocal.RecentEmpty.Visibility = 'Visible'
@@ -496,8 +540,44 @@ function Load-PopupWindow {
     $refreshTimer.Add_Tick({
         try { & $renderQueue; & $renderRecent } catch { Log-Err "popup refresh: $($_.Exception.Message)" }
     }.GetNewClosure())
+
+    # ---------- Amber caret + REC dot pulse animations ------------------
+    # Both are now programmatic so we can Stop() them when the popup hides
+    # (audit P1-27). Pre-v0.3.0 they were XAML EventTrigger + Storyboard
+    # bound to Loaded, which kept the timeline ticking Opacity every
+    # ~15ms even while the popup sat off-screen -- a battery drain that
+    # was hard to reason about because it was hidden inside the compiled
+    # storyboard tree.
+    $caretAnim = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $caretAnim.From = 1.0
+    $caretAnim.To = 0.0
+    $caretAnim.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds(450))
+    $caretAnim.AutoReverse = $true
+    $caretAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    # Freeze() lets WPF share the animation across the shared UI thread
+    # without hand-off overhead; safe because we never mutate it after.
+    try { $caretAnim.Freeze() } catch {}
+
+    $recAnim = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $recAnim.From = 1.0
+    $recAnim.To = 0.4
+    $recAnim.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds(800))
+    $recAnim.AutoReverse = $true
+    $recAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    try { $recAnim.Freeze() } catch {}
+
     $WinLocal.Add_IsVisibleChanged({
-        if ($WinLocal.IsVisible) { $refreshTimer.Start() } else { $refreshTimer.Stop() }
+        if ($WinLocal.IsVisible) {
+            $refreshTimer.Start()
+            try { $CtlLocal.AmberCaret.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $caretAnim) } catch {}
+            try { $CtlLocal.RecDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $recAnim)     } catch {}
+        } else {
+            $refreshTimer.Stop()
+            # Passing $null unbinds the animation so the timeline stops
+            # firing; Opacity stays at whatever the last frame rendered.
+            try { $CtlLocal.AmberCaret.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null) } catch {}
+            try { $CtlLocal.RecDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)     } catch {}
+        }
     }.GetNewClosure())
 
     # Queue tab "Clear finished" button
@@ -591,7 +671,9 @@ function Show-Popup {
     Log-Info "Show-Popup called (tab=$Tab)"
     try {
         $w   = Load-PopupWindow
-        if (-not $w) { Log-Err 'Load-PopupWindow returned $null'; return }
+        # Load-PopupWindow returns $null on a XAML parse failure so the tray
+        # survives (audit P1-15). We already toasted; leave quietly.
+        if (-not $w) { return }
         $ctl = $w.__Controls
         $cfg = Get-Config
 

@@ -106,7 +106,16 @@ function Load-SettingsWindow {
         -FontsUri  (_GrabFontsUri) `
         -ThemeUri  (_GrabThemeUri) `
         -AssetsUri (_GrabAssetsUri)
-    $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+    # XamlReader.Parse can throw XamlParseException on malformed XAML; caught
+    # so the tray keeps running while the diagnostic sits in the log
+    # (audit P1-15).
+    try {
+        $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+    } catch {
+        Log-Err "settings XAML parse failed: $($_.Exception.Message)"
+        try { Send-Toast 'grab UI failed to load' 'Check the log' } catch {}
+        return $null
+    }
 
     $ctl = @{}
     foreach ($n in @('TitleBar','MinBtn','CloseBtn',
@@ -190,12 +199,22 @@ function Load-SettingsWindow {
             $sitePatterns = @($rawLines | ForEach-Object { $_.Trim() } |
                               Where-Object { $_ -and -not $_.StartsWith('#') })
 
+            # Null-guard ComboBox reads (audit P1-18). Under Reset the
+            # SelectedItem can be null between the click and the SelectedIndex
+            # assignment; touching .Content on $null used to throw and abort
+            # the Save. Fall back to the sane default for the field.
+            $cookieBrowserVal = if ($CtlLocal.CookieBrowser.SelectedItem) {
+                ($CtlLocal.CookieBrowser.SelectedItem.Content).ToString()
+            } else { 'chrome' }
+            $videoQualityVal = if ($CtlLocal.VideoQuality.SelectedItem) {
+                ($CtlLocal.VideoQuality.SelectedItem.Content).ToString()
+            } else { 'best' }
             $updates = @{
                 downloadFolder     = $folder
                 askBeforeEach      = [bool]$CtlLocal.AskBeforeEach.IsChecked
                 concurrency        = [int]$CtlLocal.ConcurrencySlider.Value
-                cookieBrowser      = ($CtlLocal.CookieBrowser.SelectedItem.Content).ToString()
-                videoQuality       = ($CtlLocal.VideoQuality.SelectedItem.Content).ToString()
+                cookieBrowser      = $cookieBrowserVal
+                videoQuality       = $videoQualityVal
                 toastsEnabled      = [bool]$CtlLocal.ToastsEnabled.IsChecked
                 clipboardWatch     = [bool]$CtlLocal.ClipboardWatch.IsChecked
                 autostart          = [bool]$CtlLocal.Autostart.IsChecked
@@ -264,6 +283,10 @@ function Show-Settings {
     Log-Info 'Show-Settings called'
     try {
         $w = Load-SettingsWindow
+        # Load-SettingsWindow returns $null on a XAML parse failure so the
+        # tray keeps running (audit P1-15). We already toasted; nothing to
+        # show, so just leave quietly.
+        if (-not $w) { return }
         $ctl = $w.__Controls
         $cfg = Get-Config
 

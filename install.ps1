@@ -229,13 +229,10 @@ if (Test-Path -LiteralPath $vbsEntry) {
         -workDir $script:Root
 }
 
-Make-Shortcut `
-    -name 'grab Downloads' `
-    -target $dlFolder `
-    -args   '' `
-    -icon   "$env:SystemRoot\System32\shell32.dll,4" `
-    -desc   'Open the grab downloads folder' `
-    -workDir $dlFolder
+# v0.3.0: NO 'grab Downloads.lnk' desktop shortcut (audit P1-10). Two icons
+# on the desktop for the same app was cluttery -- the tray menu now has an
+# "Open downloads" item that supersedes it. The tray's self-heal sweep
+# deletes stale copies from prior installs (see Invoke-SelfHealSweep).
 
 # --- Autostart entry (opt-out via -NoStartup) -----------------------------
 # v0.3.0: HKCU\Run is the primary (survives OneDrive folder-sync tricks). We

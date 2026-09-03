@@ -1,11 +1,12 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="grab settings"
+        Icon="__GRAB_ASSETS__/icon.ico"
         Width="520" Height="640"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
-        ShowInTaskbar="True"
+        ShowInTaskbar="False"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResizeWithGrip"
         MinWidth="440" MinHeight="520"
@@ -192,6 +193,8 @@
               <ComboBoxItem Content="brave"/>
               <ComboBoxItem Content="none"/>
             </ComboBox>
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="GRAB reads cookies from THIS browser so links behind logins (Instagram, private videos, etc.) work. Pick the browser you're logged into."/>
 
             <!-- Video section -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="VIDEO"/>

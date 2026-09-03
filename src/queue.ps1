@@ -405,8 +405,24 @@ function Invoke-QueueTick {
         if ($ps.State -in @('Completed','Failed','Stopped')) {
             try {
                 $out = Receive-Job -Id $j.JobId -ErrorAction SilentlyContinue
-                # The child job returned an Invoke-Grab result object as its LAST output.
-                $result = $out | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['Success'] } | Select-Object -Last 1
+                # Sentinel-wrapped result (audit P1-31): the worker returns
+                # @{ __grab_result = $r }, so we pick THAT hashtable, then
+                # unwrap. Prevents earlier bug where any random PSObject with
+                # a .Success property in the pipeline (e.g. from a helper
+                # library) could pose as the download result and confuse
+                # completion accounting.
+                $sentinel = $out | Where-Object {
+                    ($_ -is [hashtable] -and $_.ContainsKey('__grab_result')) -or
+                    ($_ -is [System.Collections.IDictionary] -and $_.Keys -contains '__grab_result')
+                } | Select-Object -Last 1
+                if ($sentinel) {
+                    $result = $sentinel['__grab_result']
+                } else {
+                    # Backward-compat fallback: pre-v0.3.0 the worker emitted
+                    # the raw PSCustomObject; keep picking it up so any queue
+                    # entries mid-flight during upgrade still complete cleanly.
+                    $result = $out | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['Success'] } | Select-Object -Last 1
+                }
                 if ($result -and $result.Success) {
                     $j.Status      = 'done'
                     $j.StatusMsg   = "Grabbed $($result.FilesAdded) file(s)"
@@ -463,7 +479,11 @@ function Invoke-QueueTick {
             if ($Dest) { $params['Dest'] = $Dest }
             if ($Tool -and $Tool -ne 'auto') { $params['Tool'] = $Tool }
             if ($Sensitive) { $params['Sensitive'] = $true }
-            Invoke-Grab @params
+            $r = Invoke-Grab @params
+            # Sentinel-wrap the result (audit P1-31) so the tick-timer parser
+            # can pluck it by well-known key instead of guessing at any
+            # PSObject with a .Success property.
+            @{ __grab_result = $r }
         }
         $sensitiveFlag = [bool]$j.Sensitive
         $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $srcRoot, $j.Url, $j.Dest, $j.Tool, $sensitiveFlag

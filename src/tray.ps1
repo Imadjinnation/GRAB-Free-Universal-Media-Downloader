@@ -36,7 +36,27 @@ function Get-TrayIcon {
     # built-in Windows shell icon (download arrow) so we always have SOMETHING.
     $iconPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets\icon.ico'
     if (Test-Path $iconPath) {
-        try { return New-Object System.Drawing.Icon $iconPath } catch {}
+        try {
+            return New-Object System.Drawing.Icon $iconPath
+        } catch {
+            # v0.3.0: log the exact failure so future icon regressions are
+            # traceable. Pre-v0.3.0 the empty catch swallowed loader errors
+            # (bad ICO magic, permission denied, locked by AV) and left users
+            # staring at the shell fallback with no clue why (audit P1-14).
+            $ico = $null
+            try { $ico = Get-Item -LiteralPath $iconPath -ErrorAction Stop } catch {}
+            $bytesHead = '?'
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($iconPath)
+                if ($bytes.Length -ge 4) {
+                    $bytesHead = ('{0:X2} {1:X2} {2:X2} {3:X2}' -f $bytes[0],$bytes[1],$bytes[2],$bytes[3])
+                }
+            } catch {}
+            $size = if ($ico) { $ico.Length } else { -1 }
+            $mtime = if ($ico) { $ico.LastWriteTimeUtc } else { 'unknown' }
+            Log-Warn ("icon.ico load failed: {0}; size={1} mtime={2} head={3}; falling back to shell32.dll" -f `
+                $_.Exception.Message, $size, $mtime, $bytesHead)
+        }
     }
     # Fallback: extract from shell32.dll
     $sig = @'
@@ -53,8 +73,21 @@ public static extern int DestroyIcon(IntPtr hIcon);
     $shell = Join-Path $env:SystemRoot 'System32\shell32.dll'
     [GrabApp.IconEx]::ExtractIconEx($shell, 176, $large, $small, 1) | Out-Null   # 176 = download arrow
     if ($small[0] -ne [IntPtr]::Zero) {
-        $icon = [System.Drawing.Icon]::FromHandle($small[0])
-        return $icon.Clone()
+        try {
+            $icon = [System.Drawing.Icon]::FromHandle($small[0])
+            # Clone() produces an owned .NET copy; the native handles must be
+            # released explicitly or we leak an ICON GDI handle per call
+            # (audit P1-20: Get-TrayIcon leaked, DestroyIcon was declared but
+            # never invoked).
+            $cloned = $icon.Clone()
+            [GrabApp.IconEx]::DestroyIcon($small[0]) | Out-Null
+            if ($large[0] -ne [IntPtr]::Zero) { [GrabApp.IconEx]::DestroyIcon($large[0]) | Out-Null }
+            return $cloned
+        } catch {
+            Log-Warn "shell32 icon extract clone failed: $($_.Exception.Message)"
+            try { [GrabApp.IconEx]::DestroyIcon($small[0]) | Out-Null } catch {}
+            try { if ($large[0] -ne [IntPtr]::Zero) { [GrabApp.IconEx]::DestroyIcon($large[0]) | Out-Null } } catch {}
+        }
     }
     return [System.Drawing.SystemIcons]::Application
 }
@@ -365,7 +398,16 @@ function Confirm-ArcadeDialog {
     try {
         Ensure-WpfLoaded
         $xamlText = _ApplyGrabTokens $script:ConfirmDialogXaml
-        $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+        # XamlReader.Parse is wrapped so a malformed dialog XAML can't kill
+        # the tray -- we surface it via toast and return "no" so nothing
+        # destructive proceeds (audit P1-15).
+        try {
+            $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+        } catch {
+            Log-Err "Confirm dialog XAML parse failed: $($_.Exception.Message)"
+            try { Send-Toast 'grab UI failed to load' 'Check the log' } catch {}
+            return $false
+        }
         $w.FindName('TitleText').Text = $Title
         $w.FindName('BodyText').Text  = $Message
         $yes = $w.FindName('YesBtn'); $yes.Content = $YesLabel
@@ -474,7 +516,13 @@ function Show-AboutWindow {
     try {
         Ensure-WpfLoaded
         $xamlText = _ApplyGrabTokens $script:AboutXaml
-        $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+        try {
+            $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+        } catch {
+            Log-Err "About XAML parse failed: $($_.Exception.Message)"
+            try { Send-Toast 'grab UI failed to load' 'Check the log' } catch {}
+            return
+        }
         $body   = $w.FindName('BodyText')
         $footer = $w.FindName('Footer')
         $ok     = $w.FindName('OkBtn')
@@ -498,9 +546,130 @@ function Show-AboutWindow {
 }
 
 # ---------- Menu ----------------------------------------------------------
+# Menu renderer (audit P1-30). WinForms ContextMenuStrip defaults to Windows
+# system colors -- the tray menu was the last piece of the app that looked
+# like generic Windows chrome. Get-ArcadeMenuRenderer swaps in a
+# ProfessionalColorTable with the arcade palette so the menu matches the
+# rest of GRAB (hot-pink hover, dark card ground, warm-cream ink). Font
+# stays a system font because WinForms cannot load file-URI TTFs (Inter would
+# require the user to have it installed system-wide, which they usually do
+# not); Segoe UI at 9.5pt reads close enough at the tray menu size.
+
+function Get-ArcadeMenuRenderer {
+    Add-Type -AssemblyName System.Drawing        | Out-Null
+    Add-Type -AssemblyName System.Windows.Forms  | Out-Null
+    if (-not ('ArcadeColors' -as [type])) {
+        $sig = @'
+public class ArcadeColors : System.Windows.Forms.ProfessionalColorTable {
+    public override System.Drawing.Color MenuItemSelected { get { return System.Drawing.ColorTranslator.FromHtml("#FF2D8C"); } }
+    public override System.Drawing.Color MenuItemSelectedGradientBegin { get { return System.Drawing.ColorTranslator.FromHtml("#FF2D8C"); } }
+    public override System.Drawing.Color MenuItemSelectedGradientEnd { get { return System.Drawing.ColorTranslator.FromHtml("#C81874"); } }
+    public override System.Drawing.Color MenuItemBorder { get { return System.Drawing.ColorTranslator.FromHtml("#FF2D8C"); } }
+    public override System.Drawing.Color ToolStripDropDownBackground { get { return System.Drawing.ColorTranslator.FromHtml("#141024"); } }
+    public override System.Drawing.Color ImageMarginGradientBegin { get { return System.Drawing.ColorTranslator.FromHtml("#141024"); } }
+    public override System.Drawing.Color ImageMarginGradientMiddle { get { return System.Drawing.ColorTranslator.FromHtml("#141024"); } }
+    public override System.Drawing.Color ImageMarginGradientEnd { get { return System.Drawing.ColorTranslator.FromHtml("#141024"); } }
+    public override System.Drawing.Color SeparatorDark { get { return System.Drawing.ColorTranslator.FromHtml("#241A3E"); } }
+    public override System.Drawing.Color SeparatorLight { get { return System.Drawing.ColorTranslator.FromHtml("#241A3E"); } }
+    public override System.Drawing.Color MenuBorder { get { return System.Drawing.ColorTranslator.FromHtml("#241A3E"); } }
+}
+'@
+        try {
+            Add-Type -TypeDefinition $sig -ReferencedAssemblies System.Drawing, System.Windows.Forms
+        } catch {
+            Log-Warn "ArcadeColors compile failed: $($_.Exception.Message); menu falls back to system chrome"
+            return $null
+        }
+    }
+    try {
+        return New-Object System.Windows.Forms.ToolStripProfessionalRenderer ([ArcadeColors]::new())
+    } catch {
+        Log-Warn "ArcadeColors instantiation failed: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function _CopyDiagnostics {
+    # Copies a short diagnostic bundle to the clipboard: last N log lines +
+    # config.json + version + PID + repo path. Handy for support / bug reports.
+    # Best-effort; never throws. Called from the tray "Copy diagnostics" item.
+    try {
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine("grab v$(Get-GrabVersion)")
+        [void]$sb.AppendLine("pid: $PID")
+        [void]$sb.AppendLine("repo: $(Split-Path $PSScriptRoot -Parent)")
+        [void]$sb.AppendLine("appdata: $(Get-AppDataPath)")
+        [void]$sb.AppendLine("time: $(Get-Date -Format o)")
+        [void]$sb.AppendLine('----- config.json -----')
+        try {
+            $cfgRaw = Get-Content -LiteralPath (Get-ConfigPath) -Raw -Encoding UTF8
+            [void]$sb.AppendLine($cfgRaw)
+        } catch {
+            [void]$sb.AppendLine("(config unreadable: $($_.Exception.Message))")
+        }
+        [void]$sb.AppendLine('----- last 100 log lines -----')
+        try {
+            $today = Join-Path (Get-LogFolder) ("grab-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
+            if (Test-Path -LiteralPath $today) {
+                $tail = Get-Content -LiteralPath $today -Tail 100 -ErrorAction SilentlyContinue
+                [void]$sb.AppendLine(($tail -join "`r`n"))
+            } else {
+                [void]$sb.AppendLine('(no log today)')
+            }
+        } catch {
+            [void]$sb.AppendLine("(log tail failed: $($_.Exception.Message))")
+        }
+        [System.Windows.Forms.Clipboard]::SetText($sb.ToString())
+        Send-Toast 'grab diagnostics copied' 'Paste into a bug report / DM'
+        Log-Info 'diagnostics copied to clipboard'
+    } catch {
+        Log-Err "Copy diagnostics failed: $($_.Exception.Message)"
+    }
+}
+
+function _RestartTray {
+    # Kills the current tray and relaunches via powershell.exe (or the .vbs
+    # wrapper if available). The singleton mutex is released as this process
+    # exits, so the child grabs it cleanly. Called from the tray "Restart"
+    # menu item so users don't have to hunt for Task Manager after a stuck
+    # state (audit P1-26).
+    try {
+        $repoRoot = Split-Path $PSScriptRoot -Parent
+        $vbs      = Join-Path $repoRoot 'grab-app.vbs'
+        $entry    = Join-Path $repoRoot 'grab-app.ps1'
+        if (Test-Path -LiteralPath $vbs) {
+            Start-Process 'wscript.exe' -ArgumentList ('"' + $vbs + '"')
+        } else {
+            Start-Process 'powershell.exe' -ArgumentList @(
+                '-STA','-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass',
+                '-File', ('"' + $entry + '"')
+            )
+        }
+        Log-Info 'tray restart requested; stopping current process'
+        Stop-Tray
+    } catch {
+        Log-Err "Restart tray failed: $($_.Exception.Message)"
+    }
+}
 
 function Build-TrayMenu {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
+
+    # Apply the arcade renderer + palette. When the compile fails (very rare),
+    # fall through to system chrome so the menu still opens.
+    $renderer = Get-ArcadeMenuRenderer
+    if ($renderer) { $menu.Renderer = $renderer }
+    try {
+        $menu.BackColor  = [System.Drawing.ColorTranslator]::FromHtml('#141024')
+        $menu.ForeColor  = [System.Drawing.ColorTranslator]::FromHtml('#F5EBD0')
+        # Prefer Inter if the user has it installed system-wide, else Segoe UI.
+        # We can't load a file-URI TTF into WinForms, so this is best-effort:
+        # unknown families fall back to Segoe UI automatically.
+        $menu.Font = New-Object System.Drawing.Font('Inter', 9.5)
+    } catch {
+        Log-Warn "tray menu palette apply failed: $($_.Exception.Message)"
+    }
 
     $mShow     = $menu.Items.Add('Show grab',      $null, { if ($script:PopupShow)    { & $script:PopupShow 'paste' } })
     $mQueue    = $menu.Items.Add('Queue',          $null, { if ($script:PopupShow)    { & $script:PopupShow 'queue' } })
@@ -511,6 +680,13 @@ function Build-TrayMenu {
         $cfg = Get-Config
         if (Test-Path -LiteralPath $cfg.downloadFolder) { Start-Process explorer.exe $cfg.downloadFolder }
     })
+    $mLogs     = $menu.Items.Add('Show logs',      $null, {
+        $p = Get-LogFolder
+        if (Test-Path -LiteralPath $p) { Start-Process explorer.exe $p }
+    })
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $mDiag     = $menu.Items.Add('Copy diagnostics', $null, { _CopyDiagnostics })
+    $mRestart  = $menu.Items.Add('Restart tray',     $null, { _RestartTray })
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $mAbout    = $menu.Items.Add('About',          $null, { Show-AboutWindow })
     $mQuit     = $menu.Items.Add('Quit',           $null, { Stop-Tray })
@@ -526,12 +702,31 @@ function Start-Timers {
     # We use WPF DispatcherTimer instead of WinForms.Timer because the main
     # loop is Dispatcher.Run (see Start-Tray). DispatcherTimer fires on the
     # dispatcher thread; WinForms.Timer would never fire under Dispatcher.Run.
+    #
+    # Circuit breaker (audit P1-25): pre-v0.3.0 a broken tick handler could
+    # log-flood indefinitely (many MB/day when the queue was in a bad state).
+    # Now we count consecutive failures and stop the timer after 10 in a row,
+    # surfacing a toast so the user knows something's wrong. A successful
+    # tick resets the counter. Same policy for both timers.
+    $script:TickFailCount = 0
+    $script:ClipFailCount = 0
 
     # Queue tick every 2s
     $script:TickTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:TickTimer.Interval = [TimeSpan]::FromSeconds(2)
     $script:TickTimer.Add_Tick({
-        try { Invoke-QueueTick } catch { Log-Err "tick error: $($_.Exception.Message)" }
+        try {
+            Invoke-QueueTick
+            $script:TickFailCount = 0
+        } catch {
+            $script:TickFailCount++
+            Log-Err "tick error #$($script:TickFailCount): $($_.Exception.Message)"
+            if ($script:TickFailCount -ge 10) {
+                try { $script:TickTimer.Stop() } catch {}
+                try { Send-Toast 'grab worker halted' 'Too many errors -- check the log' } catch {}
+                Log-Err 'queue tick timer stopped after 10 consecutive failures'
+            }
+        }
     })
     $script:TickTimer.Start()
 
@@ -541,7 +736,7 @@ function Start-Timers {
     $script:ClipTimer.Add_Tick({
         try {
             $cfg = Get-Config
-            if (-not $cfg.clipboardWatch) { return }
+            if (-not $cfg.clipboardWatch) { $script:ClipFailCount = 0; return }
             $txt = try { [System.Windows.Forms.Clipboard]::GetText() } catch { '' }
             if ($txt -and $txt -ne $script:LastClipboardUrl -and (Test-IsUrl $txt)) {
                 $script:LastClipboardUrl = $txt
@@ -550,7 +745,16 @@ function Start-Timers {
                     $script:Tray.ShowBalloonTip(4000, 'grab', "Detected: $(Get-SiteName $txt)`nClick the tray icon to add it.", [System.Windows.Forms.ToolTipIcon]::Info)
                 }
             }
-        } catch { Log-Err "clip tick error: $($_.Exception.Message)" }
+            $script:ClipFailCount = 0
+        } catch {
+            $script:ClipFailCount++
+            Log-Err "clip tick error #$($script:ClipFailCount): $($_.Exception.Message)"
+            if ($script:ClipFailCount -ge 10) {
+                try { $script:ClipTimer.Stop() } catch {}
+                try { Send-Toast 'grab clipboard watch halted' 'Too many errors -- check the log' } catch {}
+                Log-Err 'clipboard watch timer stopped after 10 consecutive failures'
+            }
+        }
     })
     $script:ClipTimer.Start()
 }
@@ -713,6 +917,23 @@ function Invoke-SelfHealSweep {
         if (Test-Path -LiteralPath $oneDriveDesktop) {
             Remove-Item -LiteralPath $oneDriveDesktop -Force -ErrorAction SilentlyContinue
             Log-Info "self-heal: removed stale OneDrive Desktop shortcut ($oneDriveDesktop)"
+        }
+    } catch {}
+
+    # Delete the "grab Downloads.lnk" desktop shortcut that pre-v0.3.0
+    # installers scattered next to grab.lnk (audit P1-10). The tray menu now
+    # carries an "Open downloads" item that supersedes the shortcut. This
+    # runs at every tray start so users who installed a prior version get
+    # their desktop cleaned up next time GRAB launches, no reinstall needed.
+    try {
+        foreach ($base in @((Get-LocalDesktopPath), (Join-Path $env:USERPROFILE 'Desktop'), (Join-Path $env:USERPROFILE 'OneDrive\Desktop'))) {
+            if ($base -and (Test-Path -LiteralPath $base)) {
+                $lnk = Join-Path $base 'grab Downloads.lnk'
+                if (Test-Path -LiteralPath $lnk) {
+                    Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue
+                    Log-Info "self-heal: removed stale 'grab Downloads.lnk' ($lnk)"
+                }
+            }
         }
     } catch {}
 

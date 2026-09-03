@@ -32,6 +32,12 @@ function Invoke-YtDlp([string]$url, [string]$dest, [bool]$useCookies, [string]$b
     # No manual player_client override: nightly yt-dlp (>=2026.08.30) has
     # the `visionos` client + yt-dlp-ejs plugin, which returns 1080p/4K
     # streams without a PO Token. install.ps1 keeps the nightly channel.
+    #
+    # Test short-circuit (audit N2): when $env:GRAB_TESTS_SKIP_ENGINES is set,
+    # skip the actual yt-dlp invocation and return failure. Cuts smoke-test
+    # runtime dramatically -- the routing tests only check Destination path
+    # calculation, not real network I/O. Real users never set this env var.
+    if ($env:GRAB_TESTS_SKIP_ENGINES) { return 1 }
     $archive = Get-ArchivePath 'yt-dlp'
     $tool = Resolve-Tool 'yt-dlp'
     if (-not $tool) { throw 'yt-dlp not found. Run install.ps1.' }
@@ -73,6 +79,8 @@ function Invoke-GalleryDl([string]$url, [string]$dest, [bool]$useCookies, [strin
     # gallery-dl: uses its own subfolder template + its own archive file.
     # Companion config at assets/gallery-dl-config.json overrides directory
     # templates for sites where the default causes chapter collisions.
+    # See Invoke-YtDlp for the GRAB_TESTS_SKIP_ENGINES rationale.
+    if ($env:GRAB_TESTS_SKIP_ENGINES) { return 1 }
     $archive = Get-ArchivePath 'gallery-dl'
     $tool = Resolve-Tool 'gallery-dl'
     if (-not $tool) { throw 'gallery-dl not found. Run install.ps1.' }

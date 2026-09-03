@@ -54,6 +54,32 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
     return
 }
 
+# --- App User Model ID -----------------------------------------------------
+# Windows groups taskbar / tray / Alt-Tab entries by the process's explicit
+# AUMID. Without this, any GRAB window the user pins to their taskbar (or
+# that briefly appears in Alt-Tab) picks up the parent powershell.exe icon
+# and gets grouped under a generic "Windows PowerShell" entry -- the exact
+# "PS icon in taskbar" issue users saw when the popup or settings window
+# opened. Setting this once at process start makes GRAB windows own their
+# own tab / icon / group. Best-effort: some sandboxed / group-policy envs
+# refuse the write; we log-warn later and continue.
+if (-not ('Shell32Native' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class Shell32Native {
+    [DllImport("shell32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
+}
+'@ | Out-Null
+}
+try {
+    [Shell32Native]::SetCurrentProcessExplicitAppUserModelID('Imadjinn.GRAB.Downloader.1') | Out-Null
+} catch {
+    # Fall through: worst case, windows continue to inherit powershell.exe's
+    # taskbar identity (v0.2.x behavior). Logged after utils.ps1 loads below.
+    $script:AumidFailed = $_.Exception.Message
+}
+
 $ErrorActionPreference = 'Continue'
 $root = $PSScriptRoot
 
@@ -75,6 +101,9 @@ $script:SettingsSourced = $false
 # can grep for it in %APPDATA%\grab-app\logs.
 if ($script:MutexWasAbandoned) {
     Log-Warn 'grab-app: singleton mutex was abandoned by a prior process; reclaimed cleanly'
+}
+if ($script:AumidFailed) {
+    Log-Warn "SetCurrentProcessExplicitAppUserModelID failed: $script:AumidFailed"
 }
 
 # Ensure app data + config exist (installer usually did this already)

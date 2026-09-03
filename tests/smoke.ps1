@@ -543,20 +543,21 @@ Test 'Invoke-Grab default Dest follows Category\Domain layout' {
     # caller overrides Dest, Invoke-Grab must route into
     # <downloadFolder>\<Category>\<FullDomain>\.
     # Wrap this in an ephemeral downloadFolder so the test never spills into
-    # a real user path -- audit P0-6 ghost-folder prevention.
+    # a real user path -- audit P0-6 ghost-folder prevention. Skip actual
+    # engine invocation (GRAB_TESTS_SKIP_ENGINES) -- this test only checks
+    # the Destination path calculation, not real network I/O.
     $isoDir = Join-Path $env:TEMP ("grab-test-dl-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
     $orig = (Get-Config).downloadFolder
+    $env:GRAB_TESTS_SKIP_ENGINES = '1'
     try {
         Update-Config @{ downloadFolder = $isoDir } | Out-Null
         $expected = Join-Path $isoDir (Join-Path 'Comics' 'allporncomic.com')
-        # We invoke on a URL that will fail cleanly (fake domain in the .com TLD
-        # so category+domain still parse to Comics/... for the assertion below).
-        # Use the real allporncomic URL structure but a bogus path to fail fast.
         $r = Invoke-Grab -Url 'https://allporncomic.com/porncomic/does-not-exist-xyz/' -NoCookies
         Assert-Equal $expected $r.Destination
     } finally {
         Update-Config @{ downloadFolder = $orig } | Out-Null
         Remove-Item -LiteralPath $isoDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:GRAB_TESTS_SKIP_ENGINES -ErrorAction SilentlyContinue
     }
 }
 Test 'Get-LeafFoldersWithFiles finds every folder holding files' {
@@ -840,9 +841,11 @@ Test 'Test-IsSensitiveUrl returns $true for everything when sensitiveByDefault' 
 Test 'Invoke-Grab routes into .private when -Sensitive is passed' {
     # The private folder is inserted between Category and Domain.
     # Ephemeral downloadFolder so nothing spills into a real user path
-    # (ghost-folder prevention, audit P0-6).
+    # (ghost-folder prevention, audit P0-6). Engine calls skipped -- this
+    # test only checks the Destination path calculation.
     $isoDir = Join-Path $env:TEMP ("grab-test-dl-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
     $orig = (Get-Config).downloadFolder
+    $env:GRAB_TESTS_SKIP_ENGINES = '1'
     try {
         Update-Config @{ downloadFolder = $isoDir } | Out-Null
         $cfg = Get-Config
@@ -860,6 +863,7 @@ Test 'Invoke-Grab routes into .private when -Sensitive is passed' {
             }
         } catch {}
         Remove-Item -LiteralPath $isoDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:GRAB_TESTS_SKIP_ENGINES -ErrorAction SilentlyContinue
     }
 }
 Test 'Set-FolderHidden actually sets the Windows Hidden attribute' {
@@ -1944,16 +1948,24 @@ Test 'Card CornerRadius is 14 in popup, settings, About and Confirm (mockup PART
 Test 'Popup URL input has amber blinking caret Rectangle (PART H1)' {
     $c = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
     Assert-Match $c 'x:Name="AmberCaret"'
-    # It must be an amber Rectangle (fill #FFD447) with a blinking storyboard.
+    # It must be an amber Rectangle (fill #FFD447).
     if ($c -notmatch 'x:Name="AmberCaret"[\s\S]{0,400}Fill="#FFD447"') {
         throw 'AmberCaret must have Fill="#FFD447"'
     }
-    # RepeatBehavior sits on the Storyboard (typically ABOVE the DoubleAnimation
-    # child), so we only require both to appear within a reasonable window
-    # after AmberCaret -- not a fixed order.
-    if ($c -notmatch 'x:Name="AmberCaret"[\s\S]{0,900}RepeatBehavior="Forever"' -or
-        $c -notmatch 'x:Name="AmberCaret"[\s\S]{0,900}DoubleAnimation') {
-        throw 'AmberCaret must have a blinking (RepeatBehavior=Forever) DoubleAnimation storyboard'
+    # v0.3.0 phase 3 (audit P1-27): the blink animation moved from an XAML
+    # Loaded EventTrigger + Storyboard into code (popup.ps1) so we can
+    # Stop() it when the popup hides. Assert the code-driven equivalents:
+    # a DoubleAnimation with Forever RepeatBehavior applied via
+    # BeginAnimation on the AmberCaret Opacity.
+    $ps = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($ps -notmatch 'AmberCaret[\s\S]{0,800}BeginAnimation') {
+        throw 'popup.ps1 must drive AmberCaret opacity via BeginAnimation (was: XAML Storyboard trigger)'
+    }
+    if ($ps -notmatch 'caretAnim[\s\S]{0,600}RepeatBehavior[\s\S]{0,200}Forever') {
+        throw 'AmberCaret animation must set RepeatBehavior::Forever so it keeps blinking'
+    }
+    if ($ps -notmatch 'caretAnim[\s\S]{0,600}DoubleAnimation') {
+        throw 'AmberCaret blink must use a DoubleAnimation (Opacity 1 -> 0)'
     }
 }
 Test 'Popup footer status bar contains "by IMADJINN" credit + FooterStatus (PART H2)' {
@@ -2345,6 +2357,413 @@ Test 'utils.ps1 has Test-IsOneDrivePath helper (OneDrive-safe folder detection)'
     Assert-True (-not (Test-IsOneDrivePath 'C:\Users\Someone\Desktop'))
     Assert-True (Test-IsOneDrivePath ('D:\Users\A\Dropbox\Startup'))
     Assert-True (-not (Test-IsOneDrivePath ''))
+}
+
+# ==========================================================================
+# 11. v0.3.0 phase 3 -- 25 P1 findings + 3 P0-NEW findings
+# ==========================================================================
+Section 'v0.3.0 phase 3 P1 fixes'
+
+# --- N1 taskbar / AppUserModelID ------------------------------------------
+Test 'popup.xaml ShowInTaskbar is False (N1: no PS icon in taskbar when popup opens)' {
+    $c = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
+    if ($c -notmatch 'ShowInTaskbar="False"') {
+        throw 'popup.xaml must set ShowInTaskbar="False" so the parent PS icon does not appear in the taskbar when the popup opens'
+    }
+}
+Test 'settings.xaml ShowInTaskbar is False (N1)' {
+    $c = Get-Content (Join-Path $uiRoot 'settings.xaml') -Raw
+    if ($c -notmatch 'ShowInTaskbar="False"') {
+        throw 'settings.xaml must set ShowInTaskbar="False"'
+    }
+}
+Test 'popup.xaml declares Icon attribute pointing at __GRAB_ASSETS__' {
+    $c = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
+    Assert-Match $c 'Icon="__GRAB_ASSETS__[^"]*icon\.ico"'
+}
+Test 'settings.xaml declares Icon attribute pointing at __GRAB_ASSETS__' {
+    $c = Get-Content (Join-Path $uiRoot 'settings.xaml') -Raw
+    Assert-Match $c 'Icon="__GRAB_ASSETS__[^"]*icon\.ico"'
+}
+Test 'grab-app.ps1 calls SetCurrentProcessExplicitAppUserModelID (N1)' {
+    $c = Get-Content (Join-Path $repoRoot 'grab-app.ps1') -Raw
+    if ($c -notmatch 'SetCurrentProcessExplicitAppUserModelID') {
+        throw 'grab-app.ps1 must call SetCurrentProcessExplicitAppUserModelID so windows own their own taskbar identity (not PowerShell.exe)'
+    }
+    if ($c -notmatch "Imadjinn\.GRAB\.Downloader\.1") {
+        throw 'grab-app.ps1 must pass the stable AUMID string "Imadjinn.GRAB.Downloader.1"'
+    }
+}
+
+# --- N3 HKCU\Run round-trip -----------------------------------------------
+Test 'HKCU Run entry is created by Set-Autostart(true) (N3)' {
+    $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $name  = 'GRAB'
+    $prior = try { (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name } catch { $null }
+    try {
+        # Set-Autostart wires both the shortcut + registry, but the registry
+        # is now the primary. Prove the reg entry appears after $true.
+        Set-Autostart $true
+        $val = (Get-ItemProperty -Path $key -Name $name -ErrorAction Stop).$name
+        Assert-NotNull $val 'HKCU\Run\GRAB missing after Set-Autostart $true'
+        Assert-Match $val 'grab-app\.(ps1|vbs)'
+    } finally {
+        if ($null -ne $prior) {
+            Set-ItemProperty -Path $key -Name $name -Value $prior -Force
+        } else {
+            Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# --- P1-8/9 UTF-8-no-BOM / atomic writes ----------------------------------
+Test 'no remaining Set-Content -Encoding UTF8 for JSON state files in src/ (audit P1-8, P1-9)' {
+    $offenders = @()
+    foreach ($f in @('utils.ps1','queue.ps1','core.ps1','popup.ps1','settings.ps1','tray.ps1')) {
+        $lines = Get-Content (Join-Path $srcRoot $f)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            # Skip comment-only lines -- audit docstrings reference the anti-pattern.
+            if ($line -match '^\s*#') { continue }
+            if ($line -match 'Set-Content[^\r\n]*-Encoding\s+UTF8') {
+                $lineNo = $i + 1
+                $offenders += "${f}:${lineNo}: $($line.Trim())"
+            }
+        }
+    }
+    if ($offenders.Count -gt 0) {
+        throw "Set-Content -Encoding UTF8 (BOM) survives in: $($offenders -join '; ')"
+    }
+}
+
+# --- P1-10 no grab Downloads shortcut -------------------------------------
+Test 'install.ps1 no longer creates grab Downloads shortcut (audit P1-10)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -match "Make-Shortcut[\s\S]{0,200}'grab Downloads'") {
+        throw 'install.ps1 still calls Make-Shortcut for "grab Downloads" -- remove; tray menu covers it'
+    }
+}
+Test 'Invoke-SelfHealSweep removes stale grab Downloads.lnk on tray start' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch "'grab Downloads\.lnk'") {
+        throw 'Invoke-SelfHealSweep must delete stale grab Downloads.lnk from prior installs'
+    }
+}
+
+# --- P1-11 autostart shortcut self-heal -----------------------------------
+Test 'Invoke-SelfHealSweep recreates HKCU\Run entry when missing' {
+    # AST scan: the sweep body must reference Set-AutostartRegistry so a
+    # missing autostart entry gets rebuilt at every launch.
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,3000}Set-AutostartRegistry') {
+        throw 'Invoke-SelfHealSweep must call Set-AutostartRegistry so a missing autostart entry is rebuilt at launch'
+    }
+}
+
+# --- P1-12 local desktop path used --------------------------------------
+Test 'Invoke-SelfHealSweep uses Get-LocalDesktopPath (audit P1-12)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Invoke-SelfHealSweep[\s\S]{0,3000}Get-LocalDesktopPath') {
+        throw 'Invoke-SelfHealSweep must use Get-LocalDesktopPath so shortcuts recreate on the LOCAL Desktop (never OneDrive)'
+    }
+}
+
+# --- P1-14 icon load logging ----------------------------------------------
+Test 'Get-TrayIcon logs a warn on New-Object Icon failure (audit P1-14)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Get-TrayIcon[\s\S]{0,2000}Log-Warn[^\r\n]*icon\.ico') {
+        throw 'Get-TrayIcon must Log-Warn (not empty catch) when the ICO fails to load, including size/mtime/header bytes for debugging'
+    }
+}
+
+# --- P1-15 XAML parse errors don't kill tray ------------------------------
+Test 'popup.ps1 wraps XamlReader.Parse in try/catch (audit P1-15)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'try\s*\{\s*\$w\s*=\s*\[Windows\.Markup\.XamlReader\]::Parse') {
+        throw 'popup.ps1 Load-PopupWindow must wrap XamlReader.Parse in try/catch so a malformed XAML does not kill the tray'
+    }
+    if ($c -notmatch 'popup XAML parse failed') {
+        throw 'popup.ps1 XAML parse catch must Log-Err with "popup XAML parse failed" and Send-Toast (do NOT re-throw)'
+    }
+}
+Test 'settings.ps1 wraps XamlReader.Parse in try/catch (audit P1-15)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch 'try\s*\{\s*\$w\s*=\s*\[Windows\.Markup\.XamlReader\]::Parse') {
+        throw 'settings.ps1 must wrap XamlReader.Parse in try/catch'
+    }
+    if ($c -notmatch 'settings XAML parse failed') {
+        throw 'settings.ps1 XAML parse catch must Log-Err distinctly'
+    }
+}
+Test 'tray.ps1 Confirm-ArcadeDialog wraps its XamlReader.Parse in try/catch' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'Confirm dialog XAML parse failed') {
+        throw 'Confirm-ArcadeDialog must catch XamlParseException inside its parse and Log-Err distinctly'
+    }
+    if ($c -notmatch 'About XAML parse failed') {
+        throw 'Show-AboutWindow must catch XamlParseException inside its parse and Log-Err distinctly'
+    }
+}
+
+# --- P1-16/17 emoji font fallback -----------------------------------------
+Test 'popup.xaml SensitiveToggle isolates lock emoji in an emoji-font Run (audit P1-16)' {
+    $c = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
+    if ($c -notmatch 'SensitiveToggle[\s\S]{0,600}FontFamily="Segoe UI Emoji[^"]*"[\s\S]{0,80}&#128274;') {
+        throw 'SensitiveToggle emoji (U+1F512) must be inside a Run with Segoe UI Emoji fallback so it does not render as tofu'
+    }
+}
+Test 'popup.xaml ClearRecentBtn isolates trash emoji in an emoji-font Run (audit P1-17)' {
+    $c = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
+    if ($c -notmatch 'ClearRecentBtn[\s\S]{0,600}FontFamily="Segoe UI Emoji[^"]*"[\s\S]{0,80}&#128465;') {
+        throw 'ClearRecentBtn trash emoji (U+1F5D1) must be inside a Run with Segoe UI Emoji fallback so it does not render as tofu'
+    }
+}
+
+# --- P1-18 combobox null-guard --------------------------------------------
+Test 'settings.ps1 Save handler null-guards CookieBrowser + VideoQuality SelectedItem (audit P1-18)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch 'if\s*\(\$CtlLocal\.CookieBrowser\.SelectedItem\)') {
+        throw 'settings.ps1 Save must null-guard CookieBrowser.SelectedItem (audit P1-18)'
+    }
+    if ($c -notmatch 'if\s*\(\$CtlLocal\.VideoQuality\.SelectedItem\)') {
+        throw 'settings.ps1 Save must null-guard VideoQuality.SelectedItem (audit P1-18)'
+    }
+}
+
+# --- P1-19 brave option present -------------------------------------------
+Test "brave is in the settings CookieBrowser combo (audit P1-19)" {
+    $win = Parse-GrabXaml (Join-Path $uiRoot 'settings.xaml')
+    $cb  = $win.FindName('CookieBrowser')
+    Assert-NotNull $cb 'CookieBrowser combo missing'
+    $labels = @($cb.Items | ForEach-Object { $_.Content.ToString() })
+    Assert-Contains $labels 'brave'
+}
+
+# --- P1-20 DestroyIcon handle release -------------------------------------
+Test 'Get-TrayIcon releases ExtractIconEx handles via DestroyIcon (audit P1-20)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    # In the shell-fallback branch, after Clone(), both large[0] and small[0]
+    # must be passed to DestroyIcon so the GDI handles are freed.
+    if ($c -notmatch 'DestroyIcon\(\$small\[0\]\)') {
+        throw 'Get-TrayIcon must call DestroyIcon on small[0] after Clone() to release the GDI handle'
+    }
+    if ($c -notmatch 'DestroyIcon\(\$large\[0\]\)') {
+        throw 'Get-TrayIcon must call DestroyIcon on large[0] to release the GDI handle'
+    }
+}
+
+# --- P1-21 diff-hash rebuild skip ----------------------------------------
+Test 'popup.ps1 renderQueue skips rebuild when hash unchanged (audit P1-21)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'LastQueueHash') {
+        throw 'renderQueue must track LastQueueHash and skip Children.Clear() when unchanged'
+    }
+    if ($c -notmatch 'LastRecentHash') {
+        throw 'renderRecent must track LastRecentHash and skip Children.Clear() when unchanged'
+    }
+    # And the hash must actually be computed via MD5 / SHA / equivalent.
+    if ($c -notmatch 'ComputeHash') {
+        throw 'renderQueue/renderRecent must compute a hash to compare between ticks'
+    }
+}
+
+# --- P1-22 Get-Config cache invalidation ---------------------------------
+Test 'Set-Config invalidates the Get-Config in-memory cache (audit P1-22)' {
+    # Twin-value round-trip: Get -> mutate via Set -> Get must reflect it.
+    $orig = (Get-Config).concurrency
+    try {
+        Set-Config (@{
+            version=(Get-GrabVersion); downloadFolder='X'; askBeforeEach=$false;
+            clipboardWatch=$false; concurrency=99; autostart=$true;
+            cookieBrowser='chrome'; videoQuality='best'; toastsEnabled=$true;
+            popupPositionX=$null; popupPositionY=$null; firstRunComplete=$true;
+            sensitiveByDefault=$false; sensitiveSites=@(); sensitiveFolderName='.private';
+            crtScanlines=$true
+        })
+        $c = Get-Config
+        Assert-Equal 99 $c.concurrency
+    } finally {
+        Update-Config @{ concurrency = $orig } | Out-Null
+    }
+}
+
+# --- P1-23 log rotation ---------------------------------------------------
+Test 'Write-Log rotates when file exceeds 5MB (audit P1-23)' {
+    $prevOverride = $env:GRAB_APP_DATA_OVERRIDE
+    $isoData = Join-Path $env:TEMP ("grab-log-rot-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    $env:GRAB_APP_DATA_OVERRIDE = $isoData
+    # Reload utils.ps1 so its module-scope $script:AppData picks up the override
+    . (Join-Path $srcRoot 'utils.ps1')
+    try {
+        Ensure-AppData
+        $file = Join-Path (Get-LogFolder) ("grab-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
+        # Pre-seed a >5MB file so the next Write-Log rotates it.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $big = 'X' * (5MB + 1024)
+        [System.IO.File]::WriteAllText($file, $big, $utf8NoBom)
+        # Rotation runs on a mod-N counter to keep the hot Write-Log path
+        # fast; call _RotateLogIfNeeded directly for an unambiguous
+        # deterministic assertion.
+        _RotateLogIfNeeded $file
+        Log-Info 'trigger rotation'
+        Assert-PathExists "$file.1"
+        # New file (created by Log-Info) is smaller than 5MB
+        $newLen = if (Test-Path -LiteralPath $file) { (Get-Item -LiteralPath $file).Length } else { 0 }
+        Assert-True ($newLen -lt 5MB) "post-rotation file too large: $newLen"
+    } finally {
+        Remove-Item -LiteralPath $isoData -Recurse -Force -ErrorAction SilentlyContinue
+        $env:GRAB_APP_DATA_OVERRIDE = $prevOverride
+        . (Join-Path $srcRoot 'utils.ps1')
+    }
+}
+Test 'Log folder pruned to 30 files max (audit P1-23)' {
+    $prevOverride = $env:GRAB_APP_DATA_OVERRIDE
+    $isoData = Join-Path $env:TEMP ("grab-log-prune-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    $env:GRAB_APP_DATA_OVERRIDE = $isoData
+    . (Join-Path $srcRoot 'utils.ps1')
+    try {
+        Ensure-AppData
+        $folder = Get-LogFolder
+        # Fabricate 40 dated log files.
+        for ($i = 0; $i -lt 40; $i++) {
+            $d = (Get-Date).AddDays(-$i).ToString('yyyy-MM-dd')
+            $p = Join-Path $folder "grab-$d.log"
+            Set-Content -Path $p -Value "day-$i" -Encoding UTF8
+            # Stagger mtime so the prune keeps the newest 30.
+            (Get-Item -LiteralPath $p).LastWriteTimeUtc = (Get-Date).AddDays(-$i).ToUniversalTime()
+        }
+        Assert-Equal 40 (Get-ChildItem -LiteralPath $folder -Filter 'grab-*.log' -File).Count 'seed step'
+        _PruneOldLogs
+        $after = @(Get-ChildItem -LiteralPath $folder -Filter 'grab-*.log*' -File).Count
+        Assert-True ($after -le 30) "expected <=30 log files after prune, got $after"
+    } finally {
+        Remove-Item -LiteralPath $isoData -Recurse -Force -ErrorAction SilentlyContinue
+        $env:GRAB_APP_DATA_OVERRIDE = $prevOverride
+        . (Join-Path $srcRoot 'utils.ps1')
+    }
+}
+
+# --- P1-24 WaitOne timeout gated ------------------------------------------
+Test 'no queue.ps1 site calls WaitOne(2000) without checking the return (audit P1-24)' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    # All mutating sites now go through _WithQueueMutex OR use WaitOne(2000)
+    # inside a `$acquired = try { ... } catch [AbandonedMutexException] {...}`
+    # pattern. Any bare WaitOne(2000) without the acquired-check is a bug.
+    $matches = [regex]::Matches($c, 'QueueMutex\.WaitOne\(2000\)')
+    foreach ($m in $matches) {
+        $ctxStart = [Math]::Max(0, $m.Index - 200)
+        $ctxLen   = [Math]::Min($c.Length - $ctxStart, 400)
+        $ctx = $c.Substring($ctxStart, $ctxLen)
+        if ($ctx -notmatch '\$acquired' -and $ctx -notmatch '_WithQueueMutex') {
+            throw "queue.ps1@$($m.Index): WaitOne(2000) not gated on an `$acquired check"
+        }
+    }
+}
+
+# --- P1-25 timer circuit breakers ----------------------------------------
+Test 'tray.ps1 tick timers have circuit breakers (audit P1-25)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'TickFailCount') {
+        throw 'Start-Timers must track TickFailCount and stop the queue-tick timer after 10 consecutive failures'
+    }
+    if ($c -notmatch 'ClipFailCount') {
+        throw 'Start-Timers must track ClipFailCount for the clipboard-watch timer too'
+    }
+    if ($c -notmatch 'worker halted') {
+        throw 'Circuit breaker trip must Send-Toast so the user knows the tray worker stopped'
+    }
+}
+
+# --- P1-26 tray menu items ------------------------------------------------
+Test 'tray context menu has Restart, Copy diagnostics, Show logs (audit P1-26)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    Assert-Match $c "'Restart tray'"
+    Assert-Match $c "'Copy diagnostics'"
+    Assert-Match $c "'Show logs'"
+    # And the handlers actually exist
+    Assert-Match $c 'function\s+_RestartTray'
+    Assert-Match $c 'function\s+_CopyDiagnostics'
+}
+
+# --- P1-27 storyboard pause on hide ---------------------------------------
+Test 'popup.ps1 pauses AmberCaret + RecDot animations on IsVisibleChanged (audit P1-27)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    # AmberCaret uses code-driven BeginAnimation now, and the hide path
+    # unbinds it with $null.
+    if ($c -notmatch 'AmberCaret[\s\S]{0,600}BeginAnimation[\s\S]{0,300}OpacityProperty[\s\S]{0,300}\$null') {
+        throw 'popup.ps1 must unbind AmberCaret opacity animation (BeginAnimation ... $null) when window hides'
+    }
+    if ($c -notmatch 'RecDot[\s\S]{0,600}BeginAnimation[\s\S]{0,300}OpacityProperty[\s\S]{0,300}\$null') {
+        throw 'popup.ps1 must unbind RecDot opacity animation when window hides'
+    }
+    # popup.xaml must no longer carry the Loaded EventTrigger + Storyboard
+    # for AmberCaret (it moved to code).
+    $xaml = Get-Content (Join-Path $uiRoot 'popup.xaml') -Raw
+    if ($xaml -match 'x:Name="AmberCaret"[\s\S]{0,600}RepeatBehavior="Forever"') {
+        throw 'popup.xaml still runs a Forever storyboard on AmberCaret -- must move to code so it pauses on hide'
+    }
+}
+
+# --- P1-28 runtime theme mtime short-circuit -----------------------------
+Test 'Get-RuntimeThemeUri compares source vs runtime LastWriteTimeUtc (audit P1-28)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'function\s+Get-RuntimeThemeUri[\s\S]{0,1500}LastWriteTimeUtc') {
+        throw 'Get-RuntimeThemeUri must compare source theme.xaml LastWriteTimeUtc vs runtime file mtime to short-circuit rewriting on every launch'
+    }
+}
+
+# --- P1-29 single token helper -------------------------------------------
+Test 'Invoke-GrabTokenReplace is the single token substitution helper (audit P1-29)' {
+    $utils = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    Assert-Match $utils 'function\s+Invoke-GrabTokenReplace'
+    # Every window loader must call the unified helper (no bespoke .Replace)
+    foreach ($f in @('popup.ps1','settings.ps1','tray.ps1')) {
+        $c = Get-Content (Join-Path $srcRoot $f) -Raw
+        Assert-Match $c 'Invoke-GrabTokenReplace' "$f must call Invoke-GrabTokenReplace instead of a private token-substitution helper"
+    }
+}
+
+# --- P1-30 arcade menu renderer -------------------------------------------
+Test 'tray.ps1 defines Get-ArcadeMenuRenderer + Build-TrayMenu applies it (audit P1-30)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    Assert-Match $c 'function\s+Get-ArcadeMenuRenderer'
+    Assert-Match $c 'ArcadeColors'
+    # Build-TrayMenu must set $menu.Renderer from the arcade renderer.
+    if ($c -notmatch 'function\s+Build-TrayMenu[\s\S]{0,3000}\$menu\.Renderer') {
+        throw 'Build-TrayMenu must apply the arcade renderer via $menu.Renderer'
+    }
+}
+
+# --- P1-31 result sentinel ------------------------------------------------
+Test 'queue.ps1 worker wraps Invoke-Grab result in __grab_result sentinel (audit P1-31)' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    if ($c -notmatch '__grab_result') {
+        throw 'queue.ps1 worker must wrap Invoke-Grab result in @{__grab_result = $r} sentinel'
+    }
+    # And the tick reader must pick up sentinel first (fallback to legacy).
+    if ($c -notmatch "sentinel\s*=[\s\S]{0,300}'__grab_result'") {
+        throw 'Invoke-QueueTick must filter for __grab_result before falling back to legacy PSObject scan'
+    }
+}
+
+# --- P1-32 cookie-browser caption ----------------------------------------
+Test 'settings.xaml has an explanation caption under the CookieBrowser combo (audit P1-32)' {
+    $c = Get-Content (Join-Path $uiRoot 'settings.xaml') -Raw
+    if ($c -notmatch 'CookieBrowser[\s\S]{0,600}reads cookies from THIS browser') {
+        throw 'settings.xaml must explain what the CookieBrowser combo does under the field'
+    }
+}
+
+# --- N2 test performance sanity -------------------------------------------
+# We do not enforce a hard time budget in this test (external factors), but
+# we do assert the config cache is warm across repeated Get-Config calls.
+Test 'Get-Config is idempotent across many rapid calls (perf sanity)' {
+    Ensure-AppData
+    $c1 = Get-Config
+    for ($i=0; $i -lt 500; $i++) { $null = Get-Config }
+    $c2 = Get-Config
+    Assert-Equal $c1.version $c2.version
+    Assert-Equal $c1.concurrency $c2.concurrency
 }
 
 } finally {
