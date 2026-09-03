@@ -320,6 +320,26 @@ if (Test-Path -LiteralPath $vbsEntry) {
         -workDir $script:Root
 }
 
+# Phase X-1 (Sep 2026 hygiene pass): ALSO drop LAUNCH-GRAB.bat on the
+# visible Desktop as a bulletproof fallback. .lnk shortcuts can silently
+# break (bad quoting during creation, corrupted target, OneDrive sync
+# quarantine, roaming-profile weirdness) -- a plain .bat is just text,
+# nothing can corrupt it. If nothing else works, the user double-clicks
+# LAUNCH-GRAB.bat and the tray comes up. Ship the SAME file as in the
+# repo; do not fabricate a new one here so behavior stays identical.
+$launcherBat = Join-Path $script:Root 'LAUNCH-GRAB.bat'
+if (Test-Path -LiteralPath $launcherBat) {
+    $desktopLauncher = Join-Path $Desktop 'LAUNCH-GRAB.bat'
+    try {
+        Copy-Item -LiteralPath $launcherBat -Destination $desktopLauncher -Force
+        Ok "LAUNCH-GRAB.bat copied to Desktop as bulletproof fallback"
+    } catch {
+        Warn "Could not copy LAUNCH-GRAB.bat to Desktop: $($_.Exception.Message)"
+    }
+} else {
+    Warn "LAUNCH-GRAB.bat missing from $script:Root -- bulletproof fallback not installed"
+}
+
 # v0.3.0: NO 'grab Downloads.lnk' desktop shortcut (audit P1-10). Two icons
 # on the desktop for the same app was cluttery -- the tray menu now has an
 # "Open downloads" item that supersedes it. The tray's self-heal sweep

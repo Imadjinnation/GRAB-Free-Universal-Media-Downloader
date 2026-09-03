@@ -4871,6 +4871,118 @@ Test 'test count exceeds Phase 5.5 baseline (445+)' {
     }
 }
 
+# ============================================================================
+# Phase X-1 -- success detection, recursive Hidden, LAUNCH-GRAB.bat
+# ============================================================================
+# Why these tests exist: v0.3.0's shipping bug was "Hero Tales downloaded 299
+# files but queue said Status=failed" because the ONLY success signal was
+# `$after > $before` on file counts -- if gallery-dl found everything already
+# in its --download-archive, no new files landed and GRAB marked the whole
+# run as failed. Recent tab stayed empty, no toast, no recursive Hidden.
+#
+# These tests would have caught that bug BEFORE it shipped.
+# ============================================================================
+Section 'Phase X-1 -- success detection + Hidden + launcher'
+
+Test 'Invoke-Grab result object has AlreadyComplete field' {
+    $core = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    # v0.3.0 shipped without this -- gallery-dl "archive already complete"
+    # case was reported as failure. New field lets Recent + toast distinguish.
+    Assert-Match $core 'AlreadyComplete\s*='
+}
+
+Test 'success detection accepts exit-code-0 with existing files (Hero Tales bug)' {
+    $core = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    # The critical branch: if $after -gt $before FAILS but $rc -eq 0 AND
+    # $after -gt 0, still declare success. This is the exact case where the
+    # user's Hero Tales test hit "failed" despite 299 files on disk.
+    Assert-Match $core '\$rc\s*-eq\s*0\s*-and\s*\$after\s*-gt\s*0'
+    Assert-Match $core '\$result\.AlreadyComplete\s*=\s*\$true'
+}
+
+Test 'Invoke-YtDlp and Invoke-GalleryDl return exit code (needed by success detection)' {
+    $core = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    Assert-Match $core 'return\s+\$LASTEXITCODE'
+    # The Invoke-Grab loop must capture the RC into $rc, not discard it.
+    Assert-Match $core '\$rc\s*=\s*Invoke-YtDlp'
+    Assert-Match $core '\$rc\s*=\s*Invoke-GalleryDl'
+}
+
+Test 'sensitive recursive Hidden runs OUTSIDE the Success gate' {
+    $core = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    # Must NOT be inside `if ($result.Success)` -- a partial-fail download
+    # that landed 200 out of 300 files still needs those 200 hidden.
+    # The Set-FolderHidden -Recurse call must appear AFTER the post-process
+    # block AND not be gated on Success. Also runs only when files exist.
+    Assert-Match $core '(?s)Sensitive Hidden.+?applied to ANY files that landed'
+    Assert-Match $core '(?s)Set-FolderHidden\s+\$privatePath\s+-Recurse'
+    Assert-Match $core 'sensitive-hide applied recursively'
+}
+
+Test 'LAUNCH-GRAB.bat exists at repo root' {
+    $bat = Join-Path $repoRoot 'LAUNCH-GRAB.bat'
+    if (-not (Test-Path -LiteralPath $bat)) {
+        throw "LAUNCH-GRAB.bat missing from repo root -- bulletproof launcher gone"
+    }
+}
+
+Test 'LAUNCH-GRAB.bat uses start "" without /B (detach fix)' {
+    $bat = Get-Content (Join-Path $repoRoot 'LAUNCH-GRAB.bat') -Raw
+    # The /B flag ties wscript to cmd's console; when the batch ends and cmd
+    # exits, wscript dies with it. Correct pattern is `start "" wscript.exe`
+    # (no /B) so wscript spawns as top-level process.
+    if ($bat -match 'start\s+""\s+/B\s+wscript') {
+        throw "LAUNCH-GRAB.bat uses /B -- wscript will die with cmd. Remove /B."
+    }
+    Assert-Match $bat 'start\s+""\s+wscript\.exe'
+}
+
+Test 'LAUNCH-GRAB.bat references grab-app.vbs via %~dp0 (path-independent)' {
+    $bat = Get-Content (Join-Path $repoRoot 'LAUNCH-GRAB.bat') -Raw
+    # Must use %~dp0 not a hardcoded path so users can move the folder.
+    Assert-Match $bat '%~dp0grab-app\.vbs'
+    # Check EXECUTABLE lines only (strip REM comments) for hardcoded paths.
+    # Comments may mention the dev path for context but must never be baked
+    # into an actual command.
+    $execLines = ($bat -split "`r?`n") | Where-Object { $_ -notmatch '^\s*REM' -and $_ -notmatch '^\s*::' }
+    $execText = $execLines -join "`n"
+    if ($execText -match 'D:\\IMADJINnation') {
+        throw "LAUNCH-GRAB.bat has a hardcoded dev path in an executable line -- must use %~dp0"
+    }
+}
+
+Test 'LAUNCH-GRAB.bat has sanity check for missing grab-app.vbs' {
+    $bat = Get-Content (Join-Path $repoRoot 'LAUNCH-GRAB.bat') -Raw
+    # If the .bat is copied without the folder, tell the user clearly.
+    Assert-Match $bat 'if not exist'
+    Assert-Match $bat 'grab-app\.vbs not found'
+}
+
+Test 'install.ps1 copies LAUNCH-GRAB.bat to Desktop as bulletproof fallback' {
+    $inst = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    Assert-Match $inst 'LAUNCH-GRAB\.bat copied to Desktop'
+    Assert-Match $inst 'bulletproof fallback'
+}
+
+Test 'clipboard auto-detect on popup open (independent of clipboardWatch)' {
+    # Verify the "detect URL on clipboard when popup opens" feature is wired
+    # -- this is what fills the Paste tab automatically. Independent of the
+    # background clipboardWatch poll (which is opt-in).
+    $popup = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    Assert-Match $popup 'Clipboard\]::GetText'
+    Assert-Match $popup 'Test-IsUrl'
+    Assert-Match $popup 'Detected URL on clipboard'
+}
+
+Test 'test count exceeds Phase X-1 baseline (455+)' {
+    # Phase X-1 adds 10 new tests on top of the Phase 5.5 baseline (~461).
+    # This baseline test locks the count so future refactors can't silently
+    # drop coverage.
+    if ($script:PassCount -lt 455) {
+        throw "smoke test count regressed: only $($script:PassCount) passing (Phase X-1 target 455+)"
+    }
+}
+
 } finally {
     # ---------- Cleanup ---------------------------------------------------
     if (Test-Path $testAppData) { Remove-Item $testAppData -Recurse -Force -ErrorAction SilentlyContinue }

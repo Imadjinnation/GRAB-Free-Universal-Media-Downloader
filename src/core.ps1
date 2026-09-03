@@ -211,13 +211,14 @@ function Invoke-Grab {
 
     $chosen = if ($Tool -eq 'auto') { Pick-Tool $Url } else { $Tool }
     $result = [ordered]@{
-        Success     = $false
-        Tool        = 'none'
-        UsedCookies = $false
-        FilesAdded  = 0
-        Destination = $Dest
-        Error       = $null
-        DurationMs  = 0
+        Success         = $false
+        Tool            = 'none'
+        UsedCookies     = $false
+        FilesAdded      = 0
+        Destination     = $Dest
+        Error           = $null
+        DurationMs      = 0
+        AlreadyComplete = $false   # true when archive said everything was already downloaded
     }
 
     Log-Info "grab start | url=$Url | tool=$chosen | dest=$Dest"
@@ -248,17 +249,28 @@ function Invoke-Grab {
     }
 
     $before = Get-FileCount $Dest
+    # Track whether the tool exited cleanly on ANY attempt -- gallery-dl and
+    # yt-dlp both exit 0 when EVERYTHING listed at the URL is already in
+    # the --download-archive (a re-run against an already-complete URL). In
+    # that case $after == $before but the URL IS fully downloaded, just
+    # nothing NEW landed. Reporting "failed" here (v0.3.0 shipping bug) hid
+    # completed downloads: no Recent entry, no toast, no recursive Hidden,
+    # user thinks nothing worked. See the Hero Tales test (retroactive fix
+    # this session, permanent code fix here).
+    $cleanExit = $false
     foreach ($a in $attempts) {
+        $rc = 999
         try {
             if ($a.tool -eq 'yt-dlp') {
-                Invoke-YtDlp $Url $Dest $a.cookies $browser | Out-Null
+                $rc = Invoke-YtDlp $Url $Dest $a.cookies $browser
             } else {
-                Invoke-GalleryDl $Url $Dest $a.cookies $browser | Out-Null
+                $rc = Invoke-GalleryDl $Url $Dest $a.cookies $browser
             }
         } catch {
             Log-Err "attempt failed with exception: $($_.Exception.Message)"
         }
         $after = Get-FileCount $Dest
+        # Case A: new files landed -- unambiguous success.
         if ($after -gt $before) {
             $result.Success     = $true
             $result.Tool        = $a.tool
@@ -266,6 +278,22 @@ function Invoke-Grab {
             $result.FilesAdded  = $after - $before
             break
         }
+        # Case B: no new files BUT the tool exited 0 AND files exist at
+        # $Dest -- the archive already has everything for this URL, so we
+        # succeeded on a previous run. Still counts as success. FilesAdded
+        # stays 0 (nothing NEW this attempt), Recent gets an entry, post-
+        # process runs, recursive Hidden applies. StatusMsg reflects "no
+        # new files" so the user sees the truth.
+        if ($rc -eq 0 -and $after -gt 0) {
+            $cleanExit = $true
+            $result.Success     = $true
+            $result.Tool        = $a.tool
+            $result.UsedCookies = $a.cookies
+            $result.FilesAdded  = 0
+            $result.AlreadyComplete = $true   # popup can show a distinct badge
+            break
+        }
+        if ($rc -eq 0) { $cleanExit = $true }
     }
 
     # --- Post-processing on success ---------------------------------------
@@ -277,12 +305,22 @@ function Invoke-Grab {
         } catch {
             Log-Warn "post-process failed (non-fatal): $($_.Exception.Message)"
         }
-        # Sensitive: hide everything the download just landed. Done AFTER the
-        # engines write (so they see plain-attr paths) and idempotent.
-        if ($isSensitive -and $privatePath -and (Test-Path -LiteralPath $privatePath)) {
-            try { Set-FolderHidden $privatePath -Recurse } catch {
-                Log-Warn "sensitive-hide failed (non-fatal): $($_.Exception.Message)"
+    }
+
+    # --- Sensitive Hidden: applied to ANY files that landed under $privatePath,
+    # regardless of $result.Success. Fixes the case where a partial download
+    # (or a re-run where the archive already has files) leaves user's private
+    # content visible because success detection failed. Idempotent + safe.
+    # Runs OUTSIDE the Success gate.
+    if ($isSensitive -and $privatePath -and (Test-Path -LiteralPath $privatePath)) {
+        try {
+            $filesUnder = @(Get-ChildItem -LiteralPath $privatePath -Recurse -Force -EA SilentlyContinue)
+            if ($filesUnder.Count -gt 0) {
+                Set-FolderHidden $privatePath -Recurse
+                Log-Info "sensitive-hide applied recursively to $($filesUnder.Count) item(s) under $privatePath"
             }
+        } catch {
+            Log-Warn "sensitive-hide failed (non-fatal): $($_.Exception.Message)"
         }
     }
 
@@ -290,10 +328,21 @@ function Invoke-Grab {
     $result.DurationMs = [int]$sw.ElapsedMilliseconds
 
     if ($result.Success) {
-        Log-Info "grab done  | added=$($result.FilesAdded) | tool=$($result.Tool) | ms=$($result.DurationMs)"
+        if ($result.AlreadyComplete) {
+            Log-Info "grab done  | already-complete (archive), no new files | tool=$($result.Tool) | ms=$($result.DurationMs)"
+        } else {
+            Log-Info "grab done  | added=$($result.FilesAdded) | tool=$($result.Tool) | ms=$($result.DurationMs)"
+        }
     } else {
-        $result.Error = 'All engines and cookie combinations failed to produce new files.'
-        Log-Err  "grab fail  | url=$Url | ms=$($result.DurationMs)"
+        # Distinguish "tool failed to run" from "URL truly has no downloadable
+        # content" -- gallery-dl exit 0 with 0 files means URL was empty/404;
+        # non-zero means real failure.
+        if ($cleanExit) {
+            $result.Error = 'Site returned no downloadable content (empty/404/private).'
+        } else {
+            $result.Error = 'All engines and cookie combinations failed to produce new files.'
+        }
+        Log-Err  "grab fail  | url=$Url | ms=$($result.DurationMs) | $($result.Error)"
     }
     return [PSCustomObject]$result
 }
