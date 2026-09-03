@@ -136,10 +136,14 @@ foreach ($f in $foldersToMake) {
 Ok "App data at $script:AppData"
 
 $configPath = Join-Path $script:AppData 'config.json'
+# Dot-source utils.ps1 so we can use Get-GrabVersion, Get-DownloadFolderDefault,
+# and Write-JsonAtomic here. Keeps install.ps1 in lock-step with the app's
+# single source of truth for the version constant and the default paths.
+. (Join-Path $script:Root 'src\utils.ps1')
 if (-not (Test-Path $configPath)) {
     $defaultConfig = @{
-        version           = '0.1.0'
-        downloadFolder    = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
+        version           = Get-GrabVersion
+        downloadFolder    = Get-DownloadFolderDefault
         askBeforeEach     = $false
         clipboardWatch    = $false            # user must opt in
         concurrency       = 3
@@ -149,8 +153,8 @@ if (-not (Test-Path $configPath)) {
         popupPositionX    = $null             # remembered after user drags
         popupPositionY    = $null
         firstRunComplete  = $false
-    } | ConvertTo-Json -Depth 4
-    Set-Content -Path $configPath -Value $defaultConfig -Encoding UTF8
+    }
+    Write-JsonAtomic -Path $configPath -Data $defaultConfig -Depth 4
     Ok "Wrote default config: $configPath"
 } else {
     Ok "Existing config kept: $configPath"

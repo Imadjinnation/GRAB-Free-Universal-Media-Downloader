@@ -242,12 +242,108 @@ Test 'Ensure-AppData creates root + logs folder' {
 Test 'Get-Config creates a valid default on first read' {
     $c = Get-Config
     Assert-NotNull $c
-    Assert-Equal '0.1.0' $c.version
+    # Default now sources from the version constant, not a hardcoded string.
+    Assert-Equal (Get-GrabVersion) $c.version
     Assert-Equal $false  $c.askBeforeEach
     Assert-Equal $false  $c.clipboardWatch
     Assert-Equal 3       $c.concurrency
     Assert-NotNull $c.downloadFolder
     Assert-True (Test-Path (Get-ConfigPath)) 'config.json should be written'
+}
+Test 'Get-GrabVersion returns the v0.3.0 constant (single source of truth)' {
+    # Regression: pre-v0.3.0 the version stamp was hardcoded in ~6 places
+    # (config default, About footer, Settings label, install.ps1, README).
+    # Get-GrabVersion is the single source now -- everyone must agree.
+    Assert-Equal '0.3.0' (Get-GrabVersion)
+}
+Test 'Get-DownloadFolderDefault prefers D:\imadjinn-grab when D:\ exists' {
+    # Ghost-folder prevention (audit P0-6): default no longer routes into
+    # OneDrive/iCloud-sync-locked ~\Downloads.
+    $p = Get-DownloadFolderDefault
+    if (Test-Path -LiteralPath 'D:\') {
+        Assert-Equal 'D:\imadjinn-grab' $p
+    } else {
+        # Machine without a D:\ drive -- falls back to %USERPROFILE% root,
+        # not the ~\Downloads subfolder that used to spawn ghosts.
+        Assert-Match $p ([regex]::Escape((Join-Path $env:USERPROFILE 'imadjinn-grab')))
+    }
+}
+Test 'Write-JsonAtomic writes UTF-8 without BOM (audit P1-8)' {
+    # Set-Content -Encoding UTF8 emits a BOM in PS 5.1, which trips external
+    # tools that expect plain UTF-8. Write-JsonAtomic must not.
+    $tmp = Join-Path $env:TEMP ("grab-atomic-" + [Guid]::NewGuid().ToString('N').Substring(0,8) + ".json")
+    try {
+        Write-JsonAtomic -Path $tmp -Data @{ hello = 'world' } -Depth 2
+        Assert-PathExists $tmp
+        $bytes = [System.IO.File]::ReadAllBytes($tmp)
+        # UTF-8 BOM is EF BB BF -- first three bytes must NOT be that.
+        if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw 'Write-JsonAtomic wrote a UTF-8 BOM; it must not'
+        }
+        # And the JSON must round-trip.
+        $obj = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
+        Assert-Equal 'world' $obj.hello
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+Test 'Write-JsonAtomic replaces existing file atomically (no .tmp left behind)' {
+    $tmp = Join-Path $env:TEMP ("grab-atomic-" + [Guid]::NewGuid().ToString('N').Substring(0,8) + ".json")
+    try {
+        Write-JsonAtomic -Path $tmp -Data @{ n = 1 } -Depth 2
+        Write-JsonAtomic -Path $tmp -Data @{ n = 2 } -Depth 2
+        Assert-True (-not (Test-Path -LiteralPath "$tmp.tmp")) 'stale .tmp remains after replace'
+        $obj = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
+        Assert-Equal 2 $obj.n
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "$tmp.tmp" -Force -ErrorAction SilentlyContinue
+    }
+}
+Test 'Invoke-GrabTokenReplace substitutes the three tokens (unified helper)' {
+    $xaml = '<X fonts="__GRAB_FONTS__" theme="__GRAB_THEME__" assets="__GRAB_ASSETS__"/>'
+    $out = Invoke-GrabTokenReplace -XamlText $xaml -FontsUri 'F' -ThemeUri 'T' -AssetsUri 'A'
+    Assert-Match $out 'fonts="F"'
+    Assert-Match $out 'theme="T"'
+    Assert-Match $out 'assets="A"'
+    # Optional args skip that specific replacement.
+    $part = Invoke-GrabTokenReplace -XamlText $xaml -FontsUri 'FONLY'
+    Assert-Match $part 'fonts="FONLY"'
+    Assert-Match $part 'theme="__GRAB_THEME__"'
+}
+Test 'Get-Config version migration: legacy 0.1.0 gets bumped to current on load' {
+    # Regression for the v0.1.0 -> v0.2.2 stuck-version drift.
+    Ensure-AppData
+    $legacy = @{
+        version = '0.1.0'
+        downloadFolder = 'C:\tmp\legacy'
+        cookieBrowser = 'chrome'
+        concurrency = 3
+        toastsEnabled = $true
+    }
+    # Write directly (not via Set-Config) so no cache is seeded.
+    $legacy | ConvertTo-Json -Depth 4 | Set-Content -Path (Get-ConfigPath) -Encoding UTF8
+    # Clear the in-memory cache so the next Get-Config re-reads.
+    $ok = Get-Command -Name Get-Config -CommandType Function -ErrorAction SilentlyContinue
+    $c = Get-Config
+    Assert-Equal (Get-GrabVersion) $c.version
+    # And it persisted -- next parse sees the new value.
+    $onDisk = Get-Content -LiteralPath (Get-ConfigPath) -Raw | ConvertFrom-Json
+    Assert-Equal (Get-GrabVersion) $onDisk.version
+}
+Test 'Get-Config config cache: second read does not re-parse file' {
+    # We cannot easily test "did we skip parsing" without instrumenting the
+    # function, but we CAN test the cache mtime invariant: calling Get-Config
+    # twice back-to-back returns the same object, and mutating the returned
+    # object's transient properties is visible on the second call (proving
+    # the same reference is served).
+    $c1 = Get-Config
+    $c1 | Add-Member -MemberType NoteProperty -Name '__cache_probe' -Value 'yes' -Force
+    $c2 = Get-Config
+    # Same reference -> same probe visible
+    Assert-Equal 'yes' $c2.__cache_probe
+    # Cleanup so downstream tests don't inherit the probe
+    $c2.PSObject.Properties.Remove('__cache_probe')
 }
 Test 'Update-Config merges without losing other keys' {
     $c1 = Get-Config
@@ -446,13 +542,22 @@ Test 'Invoke-Grab default Dest follows Category\Domain layout' {
     # Regression for the folder-management redesign (2026-09-02): unless the
     # caller overrides Dest, Invoke-Grab must route into
     # <downloadFolder>\<Category>\<FullDomain>\.
-    $cfg = Get-Config
-    $expected = Join-Path $cfg.downloadFolder (Join-Path 'Comics' 'allporncomic.com')
-    # We invoke on a URL that will fail cleanly (fake domain in the .com TLD
-    # so category+domain still parse to Comics/... for the assertion below).
-    # Use the real allporncomic URL structure but a bogus path to fail fast.
-    $r = Invoke-Grab -Url 'https://allporncomic.com/porncomic/does-not-exist-xyz/' -NoCookies
-    Assert-Equal $expected $r.Destination
+    # Wrap this in an ephemeral downloadFolder so the test never spills into
+    # a real user path -- audit P0-6 ghost-folder prevention.
+    $isoDir = Join-Path $env:TEMP ("grab-test-dl-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    $orig = (Get-Config).downloadFolder
+    try {
+        Update-Config @{ downloadFolder = $isoDir } | Out-Null
+        $expected = Join-Path $isoDir (Join-Path 'Comics' 'allporncomic.com')
+        # We invoke on a URL that will fail cleanly (fake domain in the .com TLD
+        # so category+domain still parse to Comics/... for the assertion below).
+        # Use the real allporncomic URL structure but a bogus path to fail fast.
+        $r = Invoke-Grab -Url 'https://allporncomic.com/porncomic/does-not-exist-xyz/' -NoCookies
+        Assert-Equal $expected $r.Destination
+    } finally {
+        Update-Config @{ downloadFolder = $orig } | Out-Null
+        Remove-Item -LiteralPath $isoDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 Test 'Get-LeafFoldersWithFiles finds every folder holding files' {
     $root = Join-Path $env:TEMP ('gdf-' + [guid]::NewGuid().ToString('N').Substring(0,6))
@@ -734,10 +839,28 @@ Test 'Test-IsSensitiveUrl returns $true for everything when sensitiveByDefault' 
 }
 Test 'Invoke-Grab routes into .private when -Sensitive is passed' {
     # The private folder is inserted between Category and Domain.
-    $cfg = Get-Config
-    $expected = Join-Path $cfg.downloadFolder (Join-Path 'Comics' (Join-Path $cfg.sensitiveFolderName 'allporncomic.com'))
-    $r = Invoke-Grab -Url 'https://allporncomic.com/porncomic/does-not-exist-xyz/' -Sensitive -NoCookies
-    Assert-Equal $expected $r.Destination
+    # Ephemeral downloadFolder so nothing spills into a real user path
+    # (ghost-folder prevention, audit P0-6).
+    $isoDir = Join-Path $env:TEMP ("grab-test-dl-" + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    $orig = (Get-Config).downloadFolder
+    try {
+        Update-Config @{ downloadFolder = $isoDir } | Out-Null
+        $cfg = Get-Config
+        $expected = Join-Path $isoDir (Join-Path 'Comics' (Join-Path $cfg.sensitiveFolderName 'allporncomic.com'))
+        $r = Invoke-Grab -Url 'https://allporncomic.com/porncomic/does-not-exist-xyz/' -Sensitive -NoCookies
+        Assert-Equal $expected $r.Destination
+    } finally {
+        Update-Config @{ downloadFolder = $orig } | Out-Null
+        # Un-hide first because the .private root gets the Hidden attribute
+        try {
+            if (Test-Path -LiteralPath $isoDir) {
+                Get-ChildItem -LiteralPath $isoDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    try { $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::Hidden) } catch {}
+                }
+            }
+        } catch {}
+        Remove-Item -LiteralPath $isoDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 Test 'Set-FolderHidden actually sets the Windows Hidden attribute' {
     $tmp = Join-Path $env:TEMP ('hide-test-' + [guid]::NewGuid().ToString('N').Substring(0,6))

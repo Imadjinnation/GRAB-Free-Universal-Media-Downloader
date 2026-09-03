@@ -258,13 +258,15 @@ function _GrabAssetsUriTray {
 }
 
 function _ApplyGrabTokens([string]$xamlText) {
-    # Substitutes the three token markers with real file:/// URIs. This
-    # keeps the raw XAML files portable (no absolute paths committed) while
-    # letting XamlReader.Parse resolve fonts, the shared theme dictionary,
-    # and the scanlines PNG at runtime.
-    return $xamlText.Replace('__GRAB_FONTS__',  (_GrabFontsUriTray)).
-                     Replace('__GRAB_THEME__',  (_GrabThemeUriTray)).
-                     Replace('__GRAB_ASSETS__', (_GrabAssetsUriTray))
+    # Substitutes the three token markers with real file:/// URIs via the
+    # unified Invoke-GrabTokenReplace helper (see utils.ps1). Keeps the raw
+    # XAML files portable (no absolute paths committed) while letting
+    # XamlReader.Parse resolve fonts, the shared theme dictionary, and the
+    # scanlines PNG at runtime.
+    return Invoke-GrabTokenReplace -XamlText $xamlText `
+        -FontsUri  (_GrabFontsUriTray) `
+        -ThemeUri  (_GrabThemeUriTray) `
+        -AssetsUri (_GrabAssetsUriTray)
 }
 
 # ---------- Arcade-styled Yes/No confirmation dialog ----------------------

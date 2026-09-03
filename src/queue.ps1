@@ -58,13 +58,49 @@ function Read-Queue {
 function Write-Queue([array]$queue) {
     $path = Get-QueuePath
     Ensure-AppData
-    [void]$script:QueueMutex.WaitOne(2000)
+    # WaitOne can return $false on timeout OR throw AbandonedMutexException if
+    # a prior owner exited without releasing (audit P0-3). Treat both as
+    # "keep going" -- writing is safer than dropping state, and the atomic
+    # rename inside Write-JsonAtomic keeps the on-disk file valid.
+    $acquired = $false
+    try { $acquired = $script:QueueMutex.WaitOne(2000) }
+    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) {
+        Log-Warn 'Write-Queue: mutex timeout after 2s; writing anyway to avoid losing state'
+    }
     try {
-        $json = if ($queue.Count -eq 0) { '[]' } else { $queue | ConvertTo-Json -Depth 6 }
-        # Force array even for a single element
-        if ($queue.Count -eq 1 -and $json -notmatch '^\s*\[') { $json = "[$json]" }
-        Set-Content -Path $path -Value $json -Encoding UTF8
-    } finally { $script:QueueMutex.ReleaseMutex() }
+        # Force array shape even for a single-element or empty queue -- callers
+        # depend on queue.json being a JSON array.
+        if ($queue.Count -eq 0) {
+            # Write an empty array atomically. Write-JsonAtomic emits an
+            # object; use a raw file write for the empty-array shape.
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            $tmp = "$path.tmp"
+            [System.IO.File]::WriteAllText($tmp, '[]', $utf8NoBom)
+            if (Test-Path -LiteralPath $path) {
+                [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
+            } else {
+                [System.IO.File]::Move($tmp, $path)
+            }
+        } elseif ($queue.Count -eq 1) {
+            # ConvertTo-Json on a single object produces an object, not an
+            # array. Wrap manually so downstream Read-Queue still sees []...
+            $json = $queue | ConvertTo-Json -Depth 6
+            if ($json -notmatch '^\s*\[') { $json = "[$json]" }
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            $tmp = "$path.tmp"
+            [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
+            if (Test-Path -LiteralPath $path) {
+                [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
+            } else {
+                [System.IO.File]::Move($tmp, $path)
+            }
+        } else {
+            Write-JsonAtomic -Path $path -Data $queue -Depth 6
+        }
+    } finally {
+        if ($acquired) { try { $script:QueueMutex.ReleaseMutex() } catch {} }
+    }
 }
 
 # ---------- Public API ----------------------------------------------------
@@ -194,7 +230,9 @@ function Append-Recent([object]$job) {
     }
     $recent = @($entry) + $recent
     if ($recent.Count -gt 100) { $recent = $recent[0..99] }  # cap at 100
-    $recent | ConvertTo-Json -Depth 4 | Set-Content -Path $path -Encoding UTF8
+    # Atomic write (UTF-8 no BOM); a mid-write kill no longer leaves a truncated
+    # recent.json for the next Get-Recent to trip over.
+    Write-JsonAtomic -Path $path -Data $recent -Depth 4
 }
 
 function Get-Recent {
@@ -261,9 +299,33 @@ function Clear-Recent {
     }
     $removed = $before - $kept.Count
     # Always write, even for a full clear, so recent.json is a valid empty array.
-    $json = if ($kept.Count -eq 0) { '[]' } else { $kept | ConvertTo-Json -Depth 4 }
-    if ($kept.Count -eq 1 -and $json -notmatch '^\s*\[') { $json = "[$json]" }
-    Set-Content -Path $path -Value $json -Encoding UTF8
+    # Write via the atomic UTF-8-no-BOM helper. Empty and single-item arrays
+    # both need the explicit '[' wrapping because ConvertTo-Json emits a bare
+    # object for one element (and nothing for zero); Write-JsonAtomic itself
+    # only handles arbitrary objects, so wrap first, then hand it the string.
+    if ($kept.Count -eq 0) {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $tmp = "$path.tmp"
+        [System.IO.File]::WriteAllText($tmp, '[]', $utf8NoBom)
+        if (Test-Path -LiteralPath $path) {
+            [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
+        } else {
+            [System.IO.File]::Move($tmp, $path)
+        }
+    } elseif ($kept.Count -eq 1) {
+        $json = $kept | ConvertTo-Json -Depth 4
+        if ($json -notmatch '^\s*\[') { $json = "[$json]" }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $tmp = "$path.tmp"
+        [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
+        if (Test-Path -LiteralPath $path) {
+            [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
+        } else {
+            [System.IO.File]::Move($tmp, $path)
+        }
+    } else {
+        Write-JsonAtomic -Path $path -Data $kept -Depth 4
+    }
     Log-Info ("recent cleared: removed=$removed" + $(if ($PSBoundParameters.ContainsKey('OlderThan')) { " (older than $($OlderThan.ToString('o')))" } else { ' (all)' }))
     return $removed
 }

@@ -153,7 +153,7 @@ function Build-QueueRow([object]$job) {
   </Grid>
 </Border>
 "@
-    $xaml = $xaml.Replace('__GRAB_FONTS__', (_GrabFontsUri))
+    $xaml = Invoke-GrabTokenReplace -XamlText $xaml -FontsUri (_GrabFontsUri)
     $row = [Windows.Markup.XamlReader]::Parse($xaml)
     $btn = $row.FindName('ActionBtn')
     if ($btn) {
@@ -232,7 +232,7 @@ function Build-RecentRow([object]$entry) {
   </Grid>
 </Border>
 "@
-    $xaml = $xaml.Replace('__GRAB_FONTS__', (_GrabFontsUri))
+    $xaml = Invoke-GrabTokenReplace -XamlText $xaml -FontsUri (_GrabFontsUri)
     $row = [Windows.Markup.XamlReader]::Parse($xaml)
     $openBtn  = $row.FindName('OpenBtn')
     $retryBtn = $row.FindName('RetryBtn')
@@ -279,16 +279,16 @@ function Load-PopupWindow {
     if ($script:Window) { return $script:Window }
 
     $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\popup.xaml'
-    # Substitute the placeholders:
+    # Substitute the placeholders via the unified helper:
     #   __GRAB_FONTS__  -> file:///.../assets/fonts/  (Silkscreen/VT323/Inter)
     #   __GRAB_THEME__  -> file:///.../ui/theme.xaml  (shared arcade styles)
     #   __GRAB_ASSETS__ -> file:///.../assets         (scanlines.png)
-    # Tests apply the same substitution before parsing. String .Replace()
-    # (not -replace) so backslashes don't need re-escaping.
-    $xamlText = (Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8).
-                Replace('__GRAB_FONTS__',  (_GrabFontsUri)).
-                Replace('__GRAB_THEME__',  (_GrabThemeUri)).
-                Replace('__GRAB_ASSETS__', (_GrabAssetsUri))
+    # Tests apply the same substitution before parsing.
+    $rawXaml  = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
+    $xamlText = Invoke-GrabTokenReplace -XamlText $rawXaml `
+        -FontsUri  (_GrabFontsUri) `
+        -ThemeUri  (_GrabThemeUri) `
+        -AssetsUri (_GrabAssetsUri)
     $w = [Windows.Markup.XamlReader]::Parse($xamlText)
 
     # Named element handles

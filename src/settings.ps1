@@ -69,13 +69,14 @@ function Load-SettingsWindow {
     if ($script:SettingsWindow) { return $script:SettingsWindow }
 
     $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\settings.xaml'
-    # Substitute the three placeholder tokens so bundled fonts, the shared
-    # theme.xaml dictionary, and the scanlines PNG all resolve at runtime.
-    # See popup.ps1 for the same pattern.
-    $xamlText = (Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8).
-                Replace('__GRAB_FONTS__',  (_GrabFontsUri)).
-                Replace('__GRAB_THEME__',  (_GrabThemeUri)).
-                Replace('__GRAB_ASSETS__', (_GrabAssetsUri))
+    # Substitute the three placeholder tokens via the unified helper so bundled
+    # fonts, the shared theme.xaml dictionary, and the scanlines PNG all
+    # resolve at runtime. See popup.ps1 for the same pattern.
+    $rawXaml  = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
+    $xamlText = Invoke-GrabTokenReplace -XamlText $rawXaml `
+        -FontsUri  (_GrabFontsUri) `
+        -ThemeUri  (_GrabThemeUri) `
+        -AssetsUri (_GrabAssetsUri)
     $w = [Windows.Markup.XamlReader]::Parse($xamlText)
 
     $ctl = @{}
@@ -207,7 +208,9 @@ function Load-SettingsWindow {
                 -Owner    $WinLocal
         }
         if ($confirmed) {
-            $defaultFolder = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
+            # Delegated so Settings, install.ps1, Get-Config, and tests share
+            # one definition of "default download folder" (audit P0-6).
+            $defaultFolder = Get-DownloadFolderDefault
             $CtlLocal.DownloadFolder.Text = $defaultFolder
             $CtlLocal.AskBeforeEach.IsChecked = $false
             $CtlLocal.ConcurrencySlider.Value = 3
@@ -236,7 +239,7 @@ function Show-Settings {
         $cfg = Get-Config
 
         # Bind current values into controls
-        $ctl.DownloadFolder.Text = if ($cfg.downloadFolder) { [string]$cfg.downloadFolder } else { Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab' }
+        $ctl.DownloadFolder.Text = if ($cfg.downloadFolder) { [string]$cfg.downloadFolder } else { Get-DownloadFolderDefault }
         $ctl.AskBeforeEach.IsChecked = [bool]$cfg.askBeforeEach
         $ctl.ConcurrencySlider.Value = [int]$cfg.concurrency
         $ctl.ConcurrencyLabel.Text = [string][int]$cfg.concurrency

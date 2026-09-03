@@ -2,6 +2,15 @@
 # Shared helpers used by every other src/ file. No hardcoded paths.
 # Dot-source: . "$PSScriptRoot\utils.ps1"
 
+# ---------- Version constant (single source of truth) ---------------------
+# Every version-carrying surface (config.version, About footer stamp, Settings
+# VersionLabel, installer default, README) should read from Get-GrabVersion
+# so we can't drift the way v0.1.0 vs v0.2.2 vs About vs settings did in
+# v0.2.2. Bump this in ONE place per release.
+$script:GrabVersion = '0.3.0'
+
+function Get-GrabVersion { return $script:GrabVersion }
+
 # App-data root. Override with $env:GRAB_APP_DATA_OVERRIDE for tests / power-users.
 $script:AppData = if ($env:GRAB_APP_DATA_OVERRIDE) {
     $env:GRAB_APP_DATA_OVERRIDE
@@ -13,6 +22,13 @@ $script:QueuePath    = Join-Path $script:AppData 'queue.json'
 $script:RecentPath   = Join-Path $script:AppData 'recent.json'
 $script:ArchivePath  = Join-Path $script:AppData 'done-archive.txt'
 $script:LogFolder    = Join-Path $script:AppData 'logs'
+
+# ---------- Config in-memory cache ----------------------------------------
+# Get-Config used to re-parse config.json on every call (queue tick, popup
+# refresh, clipboard tick, every row build). Cache the parsed PSCustomObject
+# and invalidate on the file's LastWriteTimeUtc. Set-Config bumps this too.
+$script:ConfigCache      = $null
+$script:ConfigCacheMtime = $null
 
 # ---------- Paths ---------------------------------------------------------
 
@@ -37,14 +53,95 @@ function Ensure-AppData {
     }
 }
 
+# ---------- Atomic UTF-8-no-BOM JSON writer -------------------------------
+# Replaces `$x | ConvertTo-Json | Set-Content -Encoding UTF8`. Two goals:
+#   1) UTF-8 WITHOUT BOM. Set-Content -Encoding UTF8 writes a BOM in PS 5.1,
+#      which tripped external tools that expect plain UTF-8 (audit P1-8).
+#   2) Atomic replace. Kill mid-write no longer corrupts state (audit P1-9).
+#
+# We register a small MoveFileEx P/Invoke helper because [System.IO.File]::
+# Replace() throws "The path is not of a legal form" under Windows PowerShell
+# 5.1's overload resolution when the destinationBackupFileName is $null
+# (verified empirically on Windows 11). MoveFileEx with MOVEFILE_REPLACE_
+# EXISTING | MOVEFILE_WRITE_THROUGH is the same NTFS metadata-only rename
+# that File.Replace wraps, minus the .NET quirk.
+if (-not ('GrabApp.AtomicIO' -as [type])) {
+    Add-Type -Namespace GrabApp -Name AtomicIO -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+static extern bool MoveFileEx(string src, string dst, int flags);
+
+// MOVEFILE_REPLACE_EXISTING (0x1) + MOVEFILE_WRITE_THROUGH (0x8)
+public static void ReplaceMove(string src, string dst) {
+    if (!MoveFileEx(src, dst, 0x9)) {
+        throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error(), "MoveFileEx failed: " + src + " -> " + dst);
+    }
+}
+'@ | Out-Null
+}
+
+function Write-JsonAtomic {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Data,
+        [int]$Depth = 6
+    )
+    $tmp = "$Path.tmp"
+    $json = $Data | ConvertTo-Json -Depth $Depth
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
+    # NTFS-atomic rename over an existing file via MoveFileEx.
+    if (Test-Path -LiteralPath $Path) {
+        [GrabApp.AtomicIO]::ReplaceMove($tmp, $Path)
+    } else {
+        [System.IO.File]::Move($tmp, $Path)
+    }
+}
+
+# ---------- Default download folder ---------------------------------------
+# Central helper for the default downloadFolder value. Prefers D:\ if it
+# exists (matches the user's actual setup), else falls back to a folder
+# under %USERPROFILE% -- but NOT inside ~\Downloads because OneDrive /
+# iCloud can sync-lock those and, more importantly, tests calling
+# Invoke-Grab without a Dest override used to spill into that path and
+# create ghost folders in the user's real Downloads (audit P0-6).
+function Get-DownloadFolderDefault {
+    if (Test-Path -LiteralPath 'D:\') { return 'D:\imadjinn-grab' }
+    return (Join-Path $env:USERPROFILE 'imadjinn-grab')
+}
+
+# ---------- Unified XAML token substitution -------------------------------
+# popup.ps1, settings.ps1, and tray.ps1 each had their own copy of a helper
+# that swapped __GRAB_FONTS__ / __GRAB_THEME__ / __GRAB_ASSETS__ tokens in
+# XAML text for real file:/// URIs. That's how the theme.xaml font-token
+# fallback bug slipped in (each helper had subtle drift). One helper, one
+# source of truth. Callers still compute their own URIs (a caller may not
+# want all three) and pass in what they want substituted.
+function Invoke-GrabTokenReplace {
+    param(
+        [Parameter(Mandatory)][string]$XamlText,
+        [string]$FontsUri  = '',
+        [string]$ThemeUri  = '',
+        [string]$AssetsUri = ''
+    )
+    # PS 5.1 quirk: [string]$x = $null actually stores '' (empty string), so a
+    # `$null -ne $x` check always fires. Use IsNullOrEmpty so a caller that
+    # omits a token URI genuinely skips that substitution (leaves the token
+    # in place) rather than replacing it with empty and breaking XAML parsing.
+    $out = $XamlText
+    if (-not [string]::IsNullOrEmpty($FontsUri))  { $out = $out.Replace('__GRAB_FONTS__',  $FontsUri) }
+    if (-not [string]::IsNullOrEmpty($ThemeUri))  { $out = $out.Replace('__GRAB_THEME__',  $ThemeUri) }
+    if (-not [string]::IsNullOrEmpty($AssetsUri)) { $out = $out.Replace('__GRAB_ASSETS__', $AssetsUri) }
+    return $out
+}
+
 # ---------- Config load / save --------------------------------------------
 
 function Get-Config {
     Ensure-AppData
     if (-not (Test-Path $script:ConfigPath)) {
         $default = @{
-            version              = '0.1.0'
-            downloadFolder       = Join-Path $env:USERPROFILE 'Downloads\imadjinn-grab'
+            version              = $script:GrabVersion   # single source of truth
+            downloadFolder       = Get-DownloadFolderDefault
             askBeforeEach        = $false
             clipboardWatch       = $false
             concurrency          = 3
@@ -62,9 +159,23 @@ function Get-Config {
             # Display (arcade cabinet effects)
             crtScanlines         = $true                  # static CRT overlay in popup/settings/about
         }
-        $default | ConvertTo-Json -Depth 4 | Set-Content -Path $script:ConfigPath -Encoding UTF8
+        Write-JsonAtomic -Path $script:ConfigPath -Data $default -Depth 4
+        # Seed cache so the immediate next Get-Config doesn't re-read from disk.
+        $script:ConfigCache      = $default
+        try { $script:ConfigCacheMtime = (Get-Item -LiteralPath $script:ConfigPath).LastWriteTimeUtc } catch {}
         return $default
     }
+    # Fast path: mtime-checked in-memory cache. Get-Config runs on every
+    # queue tick, clipboard tick, popup refresh, and row build -- the file
+    # rarely changes between reads, so ConvertFrom-Json each time was pure
+    # waste. Cache invalidation keys on LastWriteTimeUtc so external edits
+    # (or another process's Set-Config) still get picked up. See audit P0-4.
+    try {
+        $curMtime = (Get-Item -LiteralPath $script:ConfigPath).LastWriteTimeUtc
+        if ($null -ne $script:ConfigCache -and $script:ConfigCacheMtime -eq $curMtime) {
+            return $script:ConfigCache
+        }
+    } catch {}
     # Malformed config.json used to crash the app on startup (ConvertFrom-Json
     # throws, then every PSObject.Properties.Name.Contains(...) call below
     # blows up on the null $cfg). If the parse fails, back up the corrupt file
@@ -80,12 +191,17 @@ function Get-Config {
         } catch {}
         # Rewrite fresh defaults + return them directly (short-circuit back-fill).
         Remove-Item -LiteralPath $script:ConfigPath -Force -ErrorAction SilentlyContinue
+        # Invalidate cache -- the recursive call will re-seed it.
+        $script:ConfigCache = $null
+        $script:ConfigCacheMtime = $null
         return Get-Config
     }
     if ($null -eq $cfg) {
         # Empty file / whitespace-only: same recovery path.
         Log-Warn 'config.json parsed as $null; rewriting defaults.'
         Remove-Item -LiteralPath $script:ConfigPath -Force -ErrorAction SilentlyContinue
+        $script:ConfigCache = $null
+        $script:ConfigCacheMtime = $null
         return Get-Config
     }
     # Back-fill new keys added post-first-config, so older configs still work
@@ -106,12 +222,31 @@ function Get-Config {
         # look after upgrading. Users can uncheck it in Settings > Display.
         $cfg | Add-Member -MemberType NoteProperty -Name crtScanlines -Value $true -Force
     }
+    # Version migration: if the on-disk config predates the current grab
+    # release, bump its version stamp and persist. Prevents drift like the
+    # v0.1.0 -> v0.2.2 gap that made every audit start with a stale config.
+    # Guarded to avoid infinite loops (Set-Config -> Get-Config).
+    if ($cfg.version -ne $script:GrabVersion) {
+        $fromVer = $cfg.version
+        $cfg.version = $script:GrabVersion
+        Set-Config $cfg
+        Log-Info "config version migrated from $fromVer to $script:GrabVersion"
+        # Set-Config already updated the cache; return the migrated object.
+        return $cfg
+    }
+    # Cache the parsed object for the next call.
+    $script:ConfigCache = $cfg
+    try { $script:ConfigCacheMtime = (Get-Item -LiteralPath $script:ConfigPath).LastWriteTimeUtc } catch {}
     return $cfg
 }
 
 function Set-Config([object]$config) {
     Ensure-AppData
-    $config | ConvertTo-Json -Depth 4 | Set-Content -Path $script:ConfigPath -Encoding UTF8
+    Write-JsonAtomic -Path $script:ConfigPath -Data $config -Depth 4
+    # Refresh cache in lock-step with the write so the very next Get-Config
+    # returns the value we just persisted (not a stale copy).
+    $script:ConfigCache = $config
+    try { $script:ConfigCacheMtime = (Get-Item -LiteralPath $script:ConfigPath).LastWriteTimeUtc } catch {}
 }
 
 function Update-Config([hashtable]$updates) {
