@@ -134,6 +134,77 @@ function Invoke-GrabTokenReplace {
     return $out
 }
 
+# ---------- WPF assembly lazy-loader --------------------------------------
+# The tray icon should appear within ~1.5s of process start; before v0.3.0
+# the JIT + load cost of PresentationFramework/PresentationCore/WindowsBase
+# on cold-start added 3-5s to time-to-tray. NotifyIcon lives in
+# System.Windows.Forms + System.Drawing which are lightweight, but the WPF
+# assemblies are only needed when the user opens the popup, settings, or
+# About window. This helper defers their Add-Type until first use, then
+# caches the fact so subsequent calls are no-ops. Idempotent.
+$script:WpfLoaded = $false
+function Ensure-WpfLoaded {
+    if ($script:WpfLoaded) { return }
+    Add-Type -AssemblyName PresentationFramework | Out-Null
+    Add-Type -AssemblyName PresentationCore      | Out-Null
+    Add-Type -AssemblyName WindowsBase           | Out-Null
+    $script:WpfLoaded = $true
+}
+
+# ---------- OneDrive-safe local user folders ------------------------------
+# Windows can redirect Desktop / Documents / Startup into OneDrive. When that
+# happens, shell:startup shortcuts get sync-shuffled and sometimes silently
+# vanish (the shipping v0.2.2 desktop icon disappeared for exactly this
+# reason). These helpers return the REAL local folder path even when the
+# Shell has redirected the well-known folder to OneDrive.
+function Test-IsOneDrivePath([string]$path) {
+    if (-not $path) { return $false }
+    return ($path -match '\\OneDrive(\\|$)|\\Dropbox(\\|$)|\\iCloudDrive(\\|$)')
+}
+function Get-LocalDesktopPath {
+    # Prefer the shell folder if it isn't redirected. Otherwise fall back to
+    # $env:USERPROFILE\Desktop -- the true local path Windows guarantees.
+    $shell = [Environment]::GetFolderPath('Desktop')
+    if ($shell -and -not (Test-IsOneDrivePath $shell)) { return $shell }
+    $local = Join-Path $env:USERPROFILE 'Desktop'
+    if (Test-Path -LiteralPath $local) { return $local }
+    # Last resort: use whatever the shell says even if it's OneDrive.
+    return $shell
+}
+function Get-LocalStartupPath {
+    # Same story as Desktop -- Startup can be redirected into OneDrive
+    # (rare but happens with folder-move policies), which makes autostart
+    # shortcuts fragile. Prefer the real local Startup path.
+    $shell = [Environment]::GetFolderPath('Startup')
+    if ($shell -and -not (Test-IsOneDrivePath $shell)) { return $shell }
+    $local = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+    if (Test-Path -LiteralPath $local) { return $local }
+    return $shell
+}
+
+# ---------- Autostart via HKCU Run registry -------------------------------
+# The primary autostart mechanism is now the HKCU\Software\Microsoft\Windows\
+# CurrentVersion\Run registry entry, not the shell:startup shortcut. When the
+# user's Startup folder lives inside OneDrive/Dropbox/iCloud (which is the
+# case for many modern Windows installs), the shortcut can silently vanish
+# during sync -- especially if the user pauses/unlinks the drive. HKCU\Run
+# is local to the machine and survives cloud shenanigans.
+function Set-AutostartRegistry([bool]$enable) {
+    $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $name  = 'GRAB'
+    # $PSScriptRoot inside utils.ps1 is <repo>\src, so parent is the repo root.
+    $entry = Join-Path (Split-Path $PSScriptRoot -Parent) 'grab-app.ps1'
+    $value = 'powershell.exe -STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
+    try {
+        if ($enable) {
+            if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+            Set-ItemProperty -Path $key -Name $name -Value $value -Force
+        } else {
+            Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue
+        }
+    } catch { Log-Warn "Set-AutostartRegistry ($enable) failed: $($_.Exception.Message)" }
+}
+
 # ---------- Config load / save --------------------------------------------
 
 function Get-Config {

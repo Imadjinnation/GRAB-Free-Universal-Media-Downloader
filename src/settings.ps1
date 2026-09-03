@@ -8,9 +8,9 @@
 #
 # Dot-source: . "$PSScriptRoot\settings.ps1"
 
-Add-Type -AssemblyName PresentationFramework | Out-Null
-Add-Type -AssemblyName PresentationCore      | Out-Null
-Add-Type -AssemblyName WindowsBase           | Out-Null
+# WinForms only (for FolderBrowserDialog). WPF assemblies load lazily via
+# Ensure-WpfLoaded (called at the top of Load-SettingsWindow) so the tray
+# icon can appear fast at startup -- see src/tray.ps1 Start-Tray phase 1.
 Add-Type -AssemblyName System.Windows.Forms  | Out-Null
 
 . "$PSScriptRoot\utils.ps1"
@@ -21,22 +21,49 @@ Add-Type -AssemblyName System.Windows.Forms  | Out-Null
 $script:SettingsWindow = $null
 
 function Get-AutostartShortcutPath {
-    Join-Path ([Environment]::GetFolderPath('Startup')) 'grab.lnk'
+    # LOCAL Startup folder always -- Get-LocalStartupPath skips OneDrive
+    # redirections that previously ate the autostart shortcut.
+    Join-Path (Get-LocalStartupPath) 'grab.lnk'
 }
 
 function Set-Autostart([bool]$enable) {
-    # Toggles shell:startup shortcut immediately (config also stored so
-    # install.ps1 respects the choice on next run).
+    # v0.3.0: dual autostart strategy. The HKCU\Run registry entry is the
+    # primary (survives OneDrive folder-sync tricks); the Startup-folder
+    # shortcut is the belt-and-braces backup. If the Startup folder is
+    # OneDrive-redirected we skip the shortcut entirely and rely on the
+    # registry entry -- OneDrive+shortcuts is exactly what killed autostart
+    # in v0.2.2 for at least one user (see audit P1-11).
+    Set-AutostartRegistry $enable
+
+    $startup = [Environment]::GetFolderPath('Startup')
+    if (Test-IsOneDrivePath $startup) {
+        Log-Warn "Startup folder is inside OneDrive/Dropbox/iCloud ($startup); autostart uses HKCU\Run only, no shortcut."
+        # If enable=false, still remove any stale shortcut that may exist.
+        if (-not $enable) {
+            $stale = Join-Path $startup 'grab.lnk'
+            if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue }
+        }
+        return
+    }
+
     $lnk = Get-AutostartShortcutPath
     if ($enable) {
         $wsh = New-Object -ComObject WScript.Shell
         $sc = $wsh.CreateShortcut($lnk)
-        $sc.TargetPath = 'powershell.exe'
-        $entry = Join-Path (Split-Path $PSScriptRoot -Parent) 'grab-app.ps1'
-        $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
-        $sc.WorkingDirectory = (Split-Path $PSScriptRoot -Parent)
-        # Prefer the bundled multi-res icon; fall back to a shell glyph.
         $repoRoot = Split-Path $PSScriptRoot -Parent
+        $vbs      = Join-Path $repoRoot 'grab-app.vbs'
+        $entry    = Join-Path $repoRoot 'grab-app.ps1'
+        # Prefer the wscript.exe silent launcher when present (no black
+        # console flash on Windows Terminal).
+        if (Test-Path -LiteralPath $vbs) {
+            $sc.TargetPath = 'wscript.exe'
+            $sc.Arguments  = '"' + $vbs + '"'
+        } else {
+            $sc.TargetPath = 'powershell.exe'
+            $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $entry + '"'
+        }
+        $sc.WorkingDirectory = $repoRoot
+        # Prefer the bundled multi-res icon; fall back to a shell glyph.
         $grabIco  = Join-Path $repoRoot 'assets\icon.ico'
         $sc.IconLocation = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { "$env:SystemRoot\System32\imageres.dll,109" }
         $sc.Description  = 'Launch grab tray at login'
@@ -67,6 +94,8 @@ function _GrabAssetsUri {
 
 function Load-SettingsWindow {
     if ($script:SettingsWindow) { return $script:SettingsWindow }
+    # First entry -- pull the WPF assemblies in on demand (see tray.ps1).
+    Ensure-WpfLoaded
 
     $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\settings.xaml'
     # Substitute the three placeholder tokens via the unified helper so bundled
@@ -280,7 +309,10 @@ function Show-Settings {
         }
         # Show current sensitive-sites list, one per line
         $ctl.SensitiveSites.Text = if ($cfg.sensitiveSites) { ($cfg.sensitiveSites -join "`r`n") } else { '' }
-        $ctl.VersionLabel.Text = "grab v$($cfg.version)  ·  state: $(Get-AppDataPath)"
+        # Single source of truth for the version stamp (audit P0-4 / P1-13):
+        # sourcing from Get-GrabVersion prevents drift when a stale config
+        # somehow bypasses the migration in Get-Config.
+        $ctl.VersionLabel.Text = "grab v$(Get-GrabVersion)  ·  state: $(Get-AppDataPath)"
         $ctl.StatusLine.Text = ''
 
         if ($w.WindowState -eq 'Minimized') { $w.WindowState = 'Normal' }

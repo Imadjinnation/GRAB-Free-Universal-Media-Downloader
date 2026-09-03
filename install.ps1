@@ -168,9 +168,28 @@ Ok "Download folder: $dlFolder"
 # --- Desktop shortcuts (rewire to new app) --------------------------------
 Section 'Desktop shortcuts'
 $WshShell = New-Object -ComObject WScript.Shell
-$Desktop = [Environment]::GetFolderPath('Desktop')
+# v0.3.0: always target the LOCAL Desktop, never OneDrive-redirected. Users
+# reported the desktop icon vanishing after sync events; the fix is to not
+# put the shortcut into OneDrive in the first place.
+$Desktop = Get-LocalDesktopPath
 $appEntry = Join-Path $script:Root 'grab-app.ps1'
+$vbsEntry = Join-Path $script:Root 'grab-app.vbs'
 $dropBat  = Join-Path $script:Root 'src\drop.bat'
+
+# Migration cleanup: if the user had prior installs, they may have grab.lnk /
+# grab Downloads.lnk on the OneDrive Desktop. Remove them so we don't end up
+# with duplicate shortcuts (one live at local Desktop, one stale at
+# OneDrive\Desktop that no longer targets a live .ps1).
+$oneDriveDesktop = Join-Path $env:USERPROFILE 'OneDrive\Desktop'
+if ($Desktop -ne $oneDriveDesktop -and (Test-Path -LiteralPath $oneDriveDesktop)) {
+    foreach ($stale in @('grab.lnk','grab Downloads.lnk')) {
+        $p = Join-Path $oneDriveDesktop $stale
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+            Ok "removed stale OneDrive Desktop shortcut ($stale)"
+        }
+    }
+}
 
 function Make-Shortcut([string]$name, [string]$target, [string]$args, [string]$icon, [string]$desc, [string]$workDir) {
     $lnk = Join-Path $Desktop "$name.lnk"
@@ -189,13 +208,26 @@ function Make-Shortcut([string]$name, [string]$target, [string]$args, [string]$i
 $grabIco = Join-Path $script:Root 'assets\icon.ico'
 $grabIconLoc = if (Test-Path -LiteralPath $grabIco) { $grabIco } else { "$env:SystemRoot\System32\shell32.dll,143" }
 
-Make-Shortcut `
-    -name 'grab' `
-    -target 'powershell.exe' `
-    -args   ('-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"') `
-    -icon   $grabIconLoc `
-    -desc   'Launch the grab tray app' `
-    -workDir $script:Root
+# v0.3.0: prefer the wscript.exe silent launcher when it ships alongside the
+# .ps1. It sidesteps the Windows Terminal "black flash on startup" issue that
+# `-WindowStyle Hidden` alone doesn't fully fix on Win11 defaults.
+if (Test-Path -LiteralPath $vbsEntry) {
+    Make-Shortcut `
+        -name 'grab' `
+        -target 'wscript.exe' `
+        -args   ('"' + $vbsEntry + '"') `
+        -icon   $grabIconLoc `
+        -desc   'Launch the grab tray app' `
+        -workDir $script:Root
+} else {
+    Make-Shortcut `
+        -name 'grab' `
+        -target 'powershell.exe' `
+        -args   ('-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"') `
+        -icon   $grabIconLoc `
+        -desc   'Launch the grab tray app' `
+        -workDir $script:Root
+}
 
 Make-Shortcut `
     -name 'grab Downloads' `
@@ -206,22 +238,62 @@ Make-Shortcut `
     -workDir $dlFolder
 
 # --- Autostart entry (opt-out via -NoStartup) -----------------------------
+# v0.3.0: HKCU\Run is the primary (survives OneDrive folder-sync tricks). We
+# also drop a shell:startup shortcut into the LOCAL Startup folder when it's
+# NOT redirected into OneDrive/Dropbox/iCloud. Cleans up stale OneDrive
+# Startup shortcuts from prior installs for the same reason as the Desktop
+# migration above.
 Section 'Autostart'
-$startup = [Environment]::GetFolderPath('Startup')
+$oneDriveStartup = Join-Path $env:USERPROFILE 'OneDrive\Microsoft\Windows\Start Menu\Programs\Startup'
+if (Test-Path -LiteralPath $oneDriveStartup) {
+    $stale = Join-Path $oneDriveStartup 'grab.lnk'
+    if (Test-Path -LiteralPath $stale) {
+        Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+        Ok 'removed stale OneDrive Startup shortcut (grab.lnk)'
+    }
+}
+$startup    = Get-LocalStartupPath
 $startupLnk = Join-Path $startup 'grab.lnk'
 if ($NoStartup) {
-    if (Test-Path $startupLnk) { Remove-Item $startupLnk -Force }
+    if (Test-Path -LiteralPath $startupLnk) { Remove-Item -LiteralPath $startupLnk -Force }
+    Set-AutostartRegistry $false
     Ok 'Autostart skipped (per -NoStartup flag)'
 } else {
-    $sc = $WshShell.CreateShortcut($startupLnk)
-    $sc.TargetPath = 'powershell.exe'
-    $sc.Arguments  = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"'
-    $sc.WorkingDirectory = $script:Root
-    $sc.IconLocation = $grabIconLoc
-    $sc.Description = 'Start grab tray at login'
-    $sc.Save()
-    Ok "Autostart enabled: $startupLnk"
+    # Registry entry first (the primary, always writeable).
+    Set-AutostartRegistry $true
+    Ok 'HKCU\Run\GRAB registry entry set'
+    # Startup-folder shortcut only when it's a real local path.
+    if (Test-IsOneDrivePath $startup) {
+        Warn "Startup folder is in OneDrive ($startup); using HKCU\Run only. Autostart still works."
+    } else {
+        $sc = $WshShell.CreateShortcut($startupLnk)
+        if (Test-Path -LiteralPath $vbsEntry) {
+            $sc.TargetPath = 'wscript.exe'
+            $sc.Arguments  = '"' + $vbsEntry + '"'
+        } else {
+            $sc.TargetPath = 'powershell.exe'
+            $sc.Arguments  = '-STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $appEntry + '"'
+        }
+        $sc.WorkingDirectory = $script:Root
+        $sc.IconLocation = $grabIconLoc
+        $sc.Description = 'Start grab tray at login'
+        $sc.Save()
+        Ok "Startup shortcut: $startupLnk"
+    }
 }
+
+# --- Windows 11 tray icon promotion (show in taskbar, not up-caret) ------
+# Users report GRAB's tray icon defaulting to the hidden "up-caret" tray on
+# Win11. Setting the NotifyIconSettings promotion flag for our stable GUID
+# tells Windows to keep the icon in the taskbar. Best-effort: this key may
+# be shell-managed and rejected on some builds; we ignore failures.
+try {
+    $grabGuid = '{f3e2c9a1-4b8e-4d3a-9c1b-5e6a7b8c9d0e}'
+    $notifyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\NotifyIconSettings\$grabGuid"
+    if (-not (Test-Path $notifyKey)) { New-Item -Path $notifyKey -Force | Out-Null }
+    New-ItemProperty -Path $notifyKey -Name 'IsPromoted' -Value 1 -PropertyType DWORD -Force | Out-Null
+    Ok 'tray promotion registry key set (IsPromoted=1)'
+} catch { Warn "tray promotion registry write failed: $($_.Exception.Message)" }
 
 # --- Summary --------------------------------------------------------------
 Write-Host ""

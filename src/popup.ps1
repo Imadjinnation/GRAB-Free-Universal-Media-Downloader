@@ -14,10 +14,12 @@
 #
 # Dot-source: . "$PSScriptRoot\popup.ps1"
 
-Add-Type -AssemblyName PresentationFramework | Out-Null
-Add-Type -AssemblyName PresentationCore      | Out-Null
-Add-Type -AssemblyName WindowsBase           | Out-Null
-Add-Type -AssemblyName System.Windows.Forms  | Out-Null   # for Screen.WorkingArea
+# WinForms is cheap and needed at row-build time (Screen.WorkingArea for
+# multi-monitor checks). WPF assemblies are deferred to Ensure-WpfLoaded
+# so the first tray icon appears without waiting on their JIT (see
+# src/tray.ps1 Start-Tray phase 1). Load-PopupWindow calls Ensure-WpfLoaded
+# up front so any WPF class reference in this file resolves.
+Add-Type -AssemblyName System.Windows.Forms  | Out-Null
 
 . "$PSScriptRoot\utils.ps1"
 . "$PSScriptRoot\queue.ps1"
@@ -277,6 +279,10 @@ function _GrabAssetsUri {
 
 function Load-PopupWindow {
     if ($script:Window) { return $script:Window }
+    # First time through -- ensure the WPF assemblies are loaded (tray.ps1
+    # defers them so the tray icon appears fast; the popup is the first
+    # user surface that actually needs XamlReader / Window classes).
+    Ensure-WpfLoaded
 
     $xamlPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'ui\popup.xaml'
     # Substitute the placeholders via the unified helper:

@@ -889,15 +889,20 @@ Test 'popup.xaml has the SensitiveToggle checkbox on the Paste tab' {
 }
 
 Test 'grab-app.ps1 declares the singleton mutex correctly (prevents multi-tray bug)' {
-    # Regression: earlier I forgot to pre-declare $script:GotLock and every
-    # instance thought it was second, so NONE ran. Also, if this check is
-    # missing entirely, restarts stack up N tray icons.
+    # v0.3.0: singleton now uses the non-owning-constructor + WaitOne(0) so
+    # AbandonedMutexException is a recoverable "reclaim" rather than a
+    # startup crash (audit P0-3). Either the old $script:GotLock pattern or
+    # the new WaitOne(0)+AbandonedMutex pattern satisfies "we have a
+    # singleton". The new pattern is checked more precisely by
+    # "grab-app.ps1 handles AbandonedMutexException".
     $content = Get-Content (Join-Path $repoRoot 'grab-app.ps1') -Raw
     if ($content -notmatch 'GrabAppTraySingleton') {
         throw 'grab-app.ps1 missing named-mutex singleton (users can end up with duplicate tray icons)'
     }
-    if ($content -notmatch '\$script:GotLock\s*=\s*\$false') {
-        throw 'grab-app.ps1 must pre-declare $script:GotLock = $false before [ref] uses it (PS 5.1 quirk)'
+    $legacyOK = $content -match '\$script:GotLock\s*=\s*\$false'
+    $v030OK   = ($content -match 'WaitOne\(0\)') -and ($content -match 'AbandonedMutexException')
+    if (-not ($legacyOK -or $v030OK)) {
+        throw 'grab-app.ps1 singleton must either pre-declare $script:GotLock (old pattern) or use WaitOne(0)+AbandonedMutexException recovery (v0.3.0)'
     }
 }
 Test 'tray.ps1 uses WPF Dispatcher.Run() as the primary loop' {
@@ -1364,14 +1369,29 @@ Test 'settings.ps1 no longer calls [System.Windows.MessageBox]::Show' {
     }
     Assert-Match $c 'Confirm-ArcadeDialog' 'settings.ps1 must call Confirm-ArcadeDialog for the reset confirmation'
 }
-Test 'No src/*.ps1 file calls [System.Windows.MessageBox]::Show' {
+Test 'No src/*.ps1 file uses [System.Windows.MessageBox]::Show for user decisions' {
+    # v0.3.0 exception: tray.ps1 uses MessageBox.Show as the LAST-RESORT
+    # crash-notification path inside the Dispatcher.Run catch block, when
+    # the arcade UI is by definition unavailable (the WPF pump just died).
+    # Any other MessageBox.Show call is still a regression -- users must
+    # see the arcade Confirm-ArcadeDialog for regular decisions.
     $files = Get-ChildItem $srcRoot -Filter '*.ps1' -File
     $offenders = @()
     foreach ($f in $files) {
         $c = Get-Content -LiteralPath $f.FullName -Raw
-        if ($c -match '\[System\.Windows\.MessageBox\]::Show') { $offenders += $f.Name }
+        # Find every MessageBox.Show call and verify it sits inside a
+        # "Dispatcher.Run crashed" context (the sanctioned last-resort).
+        $matches = [regex]::Matches($c, '\[System\.Windows\.MessageBox\]::Show')
+        foreach ($m in $matches) {
+            $ctxStart = [Math]::Max(0, $m.Index - 600)
+            $ctxLen   = [Math]::Min($c.Length - $ctxStart, 900)
+            $ctx = $c.Substring($ctxStart, $ctxLen)
+            if ($ctx -notmatch 'Dispatcher\.Run crashed') {
+                $offenders += "$($f.Name)@$($m.Index)"
+            }
+        }
     }
-    if ($offenders.Count -gt 0) { throw "MessageBox.Show found in: $($offenders -join ', ')" }
+    if ($offenders.Count -gt 0) { throw "MessageBox.Show used outside the Dispatcher.Run crash handler in: $($offenders -join ', ')" }
 }
 Test 'tray.ps1 defines Confirm-ArcadeDialog' {
     $cmd = Get-Command Confirm-ArcadeDialog -ErrorAction SilentlyContinue
@@ -1990,6 +2010,341 @@ Test 'grab-app.ps1 references src\utils.ps1 via Join-Path (not absolute)' {
     $c = Get-Content (Join-Path $repoRoot 'grab-app.ps1') -Raw
     # regex \\ in PS string = single backslash in the file's text
     Assert-Match $c "Join-Path.*src\\utils\.ps1"
+}
+
+# ==========================================================================
+# 10. v0.3.0 phase 1.7 -- fast tray startup + phase 2 P0 fixes
+# ==========================================================================
+Section 'v0.3.0 fast tray startup + P0 fixes'
+
+Test 'tray.ps1 no longer eagerly loads PresentationFramework at dot-source time' {
+    # Regression: Add-Type PresentationFramework at file top adds 2-3s JIT
+    # to cold start. It must load via Ensure-WpfLoaded when a WPF window
+    # first renders (About / Confirm dialog).
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -match '(?m)^Add-Type\s+-AssemblyName\s+PresentationFramework') {
+        throw 'tray.ps1 still has top-level Add-Type PresentationFramework -- defer via Ensure-WpfLoaded'
+    }
+    if ($c -match '(?m)^Add-Type\s+-AssemblyName\s+PresentationCore') {
+        throw 'tray.ps1 still has top-level Add-Type PresentationCore -- defer via Ensure-WpfLoaded'
+    }
+    if ($c -match '(?m)^Add-Type\s+-AssemblyName\s+WindowsBase') {
+        throw 'tray.ps1 still has top-level Add-Type WindowsBase -- defer via Ensure-WpfLoaded'
+    }
+}
+Test 'popup.ps1 no longer eagerly loads PresentationFramework at dot-source time' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -match '(?m)^Add-Type\s+-AssemblyName\s+PresentationFramework') {
+        throw 'popup.ps1 still has top-level Add-Type PresentationFramework -- defer via Ensure-WpfLoaded'
+    }
+}
+Test 'settings.ps1 no longer eagerly loads PresentationFramework at dot-source time' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -match '(?m)^Add-Type\s+-AssemblyName\s+PresentationFramework') {
+        throw 'settings.ps1 still has top-level Add-Type PresentationFramework -- defer via Ensure-WpfLoaded'
+    }
+}
+Test 'utils.ps1 defines Ensure-WpfLoaded (idempotent WPF assembly loader)' {
+    $cmd = Get-Command Ensure-WpfLoaded -ErrorAction SilentlyContinue
+    Assert-NotNull $cmd 'Ensure-WpfLoaded missing from utils.ps1'
+    # Calling twice must not throw and must be a no-op after first call.
+    Ensure-WpfLoaded
+    Ensure-WpfLoaded
+    # Verify the WPF assemblies did load (Ensure-WpfLoaded is a public API).
+    $loaded = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'PresentationFramework' }
+    Assert-NotNull $loaded 'PresentationFramework did not load after Ensure-WpfLoaded'
+}
+Test 'Show-AboutWindow calls Ensure-WpfLoaded (defensive on cold-start)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Show-AboutWindow[\s\S]{0,400}Ensure-WpfLoaded') {
+        throw 'Show-AboutWindow must call Ensure-WpfLoaded first so the XamlReader class is available'
+    }
+}
+Test 'Confirm-ArcadeDialog calls Ensure-WpfLoaded' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Confirm-ArcadeDialog[\s\S]{0,600}Ensure-WpfLoaded') {
+        throw 'Confirm-ArcadeDialog must call Ensure-WpfLoaded first'
+    }
+}
+Test 'Load-PopupWindow calls Ensure-WpfLoaded' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'function\s+Load-PopupWindow[\s\S]{0,400}Ensure-WpfLoaded') {
+        throw 'Load-PopupWindow must call Ensure-WpfLoaded before parsing XAML'
+    }
+}
+Test 'Load-SettingsWindow calls Ensure-WpfLoaded' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch 'function\s+Load-SettingsWindow[\s\S]{0,400}Ensure-WpfLoaded') {
+        throw 'Load-SettingsWindow must call Ensure-WpfLoaded before parsing XAML'
+    }
+}
+
+Test 'grab-app.ps1 lazily dot-sources popup.ps1 and settings.ps1' {
+    # Regression for the "tray icon takes 5-8s to appear" report: eager
+    # dot-sourcing of these two files added JIT + parse cost before the
+    # tray icon ever showed. The callbacks must dot-source on demand,
+    # guarded by a $script:*Sourced flag so repeated shows are cheap.
+    $c = Get-Content (Join-Path $repoRoot 'grab-app.ps1') -Raw
+    # No eager dot-source of popup.ps1 or settings.ps1 at the top
+    if ($c -match '(?m)^\.\s+\(Join-Path\s+\$root\s+.*popup\.ps1') {
+        throw 'grab-app.ps1 still eagerly dot-sources popup.ps1 -- defer to $onShowPopup callback'
+    }
+    if ($c -match '(?m)^\.\s+\(Join-Path\s+\$root\s+.*settings\.ps1') {
+        throw 'grab-app.ps1 still eagerly dot-sources settings.ps1 -- defer to $onShowSettings callback'
+    }
+    # Must have the guarded-lazy-load pattern for both files.
+    if ($c -notmatch 'PopupSourced[\s\S]{0,400}popup\.ps1') {
+        throw 'grab-app.ps1 missing lazy dot-source of popup.ps1 (guarded by $script:PopupSourced)'
+    }
+    if ($c -notmatch 'SettingsSourced[\s\S]{0,400}settings\.ps1') {
+        throw 'grab-app.ps1 missing lazy dot-source of settings.ps1 (guarded by $script:SettingsSourced)'
+    }
+}
+
+Test 'Start-Tray creates tray icon BEFORE loading WPF (phase 1 of startup)' {
+    # The whole point of the "fast tray startup" refactor: NotifyIcon
+    # creation + Visible=true must happen before Ensure-WpfLoaded so users
+    # see the tray as fast as possible. Uses the AST rather than a regex so
+    # nested braces and param blocks don't fool the parser.
+    $path = Join-Path $srcRoot 'tray.ps1'
+    $tokens = $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    $fn = $ast.FindAll({
+        param($n)
+        $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-Tray'
+    }, $true) | Select-Object -First 1
+    Assert-NotNull $fn 'Start-Tray function not found in tray.ps1'
+    $body = $fn.Body.Extent.Text
+    $trayVisIdx = $body.IndexOf('$script:Tray.Visible = $true')
+    $wpfIdx     = $body.IndexOf('Ensure-WpfLoaded')
+    if ($trayVisIdx -lt 0) { throw 'Start-Tray does not set $script:Tray.Visible = $true' }
+    if ($wpfIdx -lt 0)     { throw 'Start-Tray does not call Ensure-WpfLoaded' }
+    if ($trayVisIdx -gt $wpfIdx) {
+        throw "Start-Tray calls Ensure-WpfLoaded (offset=$wpfIdx) BEFORE making the tray icon visible (offset=$trayVisIdx) -- must be the other way around"
+    }
+}
+
+Test 'Start-Tray wraps Dispatcher.Run in try/catch (audit P0-1)' {
+    # Regression: unhandled WPF exception in the pump killed the tray
+    # silently. Must catch, log, and surface via MessageBox before re-throw.
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'try\s*\{\s*\[System\.Windows\.Threading\.Dispatcher\]::Run\(\)') {
+        throw 'tray.ps1 must wrap [Dispatcher]::Run() in try { } catch { }'
+    }
+    if ($c -notmatch 'Dispatcher\.Run crashed') {
+        throw 'tray.ps1 catch block must Log-Err with "Dispatcher.Run crashed" so failures show in the log'
+    }
+    if ($c -notmatch 'MessageBox\]::Show[\s\S]{0,400}Tray crash') {
+        throw 'tray.ps1 catch block must show a MessageBox so the user knows the tray died'
+    }
+}
+
+Test 'tray.ps1 defines Invoke-SelfHealSweep (audit P0-2)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    Assert-Match $c 'function\s+Invoke-SelfHealSweep'
+    # Start-Tray must call it.
+    if ($c -notmatch 'Invoke-SelfHealSweep') {
+        throw 'Start-Tray must call Invoke-SelfHealSweep during startup'
+    }
+    # It must at least reference the ghost folder + Set-AutostartRegistry.
+    if ($c -notmatch 'Downloads\\imadjinn-grab') {
+        throw 'Invoke-SelfHealSweep must inspect ~\Downloads\imadjinn-grab (ghost folder cleanup)'
+    }
+    if ($c -notmatch 'Set-AutostartRegistry') {
+        throw 'Invoke-SelfHealSweep must reference Set-AutostartRegistry (recreate autostart if missing)'
+    }
+}
+
+Test 'Start-Tray calls Invoke-SelfHealSweep' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    # Simple: sweep call site must exist inside Start-Tray body.
+    if ($c -notmatch '(?s)function\s+Start-Tray[\s\S]{0,4000}Invoke-SelfHealSweep') {
+        throw 'Start-Tray does not invoke Invoke-SelfHealSweep'
+    }
+}
+
+Test 'Start-Tray sets Windows 11 tray promotion registry key' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'NotifyIconSettings') {
+        throw 'Start-Tray must write HKCU\Software\...\NotifyIconSettings promotion key'
+    }
+    if ($c -notmatch 'IsPromoted') {
+        throw 'Start-Tray promotion write must set IsPromoted DWORD'
+    }
+}
+
+Test 'Start-Tray shows first-run tray-pin balloon' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'firstRunComplete') {
+        throw 'Start-Tray first-run gate missing (must set firstRunComplete after showing balloon)'
+    }
+    # v0.3.0: balloon must nudge the user to drag the icon out of the
+    # up-caret so it stays visible.
+    if ($c -notmatch 'up-caret') {
+        throw 'Start-Tray first-run balloon must mention "up-caret" to help users pin the icon'
+    }
+}
+
+Test 'grab-app.ps1 handles AbandonedMutexException (audit P0-3)' {
+    $c = Get-Content (Join-Path $repoRoot 'grab-app.ps1') -Raw
+    # Uses WaitOne(0) inside a try/catch so an abandoned singleton mutex
+    # (from a force-killed prior process) is reclaimed cleanly, not treated
+    # as "already running".
+    if ($c -notmatch 'WaitOne\(0\)') {
+        throw 'grab-app.ps1 singleton must use WaitOne(0) so we can distinguish "held elsewhere" from "abandoned"'
+    }
+    if ($c -notmatch 'AbandonedMutexException') {
+        throw 'grab-app.ps1 must catch AbandonedMutexException from WaitOne to recover from a prior crash'
+    }
+}
+
+Test 'utils.ps1 defines Set-AutostartRegistry (audit P0-5, P1-11)' {
+    $cmd = Get-Command Set-AutostartRegistry -ErrorAction SilentlyContinue
+    Assert-NotNull $cmd 'Set-AutostartRegistry missing (needed as autostart primary when Startup folder is OneDrive-redirected)'
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    if ($c -notmatch 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run') {
+        throw 'Set-AutostartRegistry must target HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+    }
+}
+
+Test 'Set-AutostartRegistry writes/removes the HKCU\Run entry when enabled' {
+    # Round-trip. Save current state and restore after so we don't clobber
+    # the user's own autostart preference.
+    $key   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $name  = 'GRAB'
+    $prior = try { (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name } catch { $null }
+    try {
+        Set-AutostartRegistry $true
+        $val = (Get-ItemProperty -Path $key -Name $name -ErrorAction Stop).$name
+        Assert-Match $val 'grab-app\.ps1'
+        Set-AutostartRegistry $false
+        $after = try { (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name } catch { $null }
+        Assert-True ($null -eq $after) 'HKCU\Run\GRAB should be gone after Set-AutostartRegistry $false'
+    } finally {
+        # Restore prior state so this test never leaks.
+        if ($null -ne $prior) {
+            Set-ItemProperty -Path $key -Name $name -Value $prior -Force
+        } else {
+            Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test 'Set-Autostart also invokes Set-AutostartRegistry (dual autostart)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch 'function\s+Set-Autostart[\s\S]{0,600}Set-AutostartRegistry') {
+        throw 'Set-Autostart in settings.ps1 must call Set-AutostartRegistry (HKCU\Run is the primary autostart)'
+    }
+}
+
+Test 'Set-Autostart refuses OneDrive Startup folder for the shortcut' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    # Must guard shortcut creation with Test-IsOneDrivePath check.
+    if ($c -notmatch 'Test-IsOneDrivePath') {
+        throw 'Set-Autostart must check Test-IsOneDrivePath on the Startup folder to avoid the vanishing-shortcut bug'
+    }
+}
+
+Test 'utils.ps1 defines Get-LocalDesktopPath and Get-LocalStartupPath' {
+    Assert-NotNull (Get-Command Get-LocalDesktopPath -ErrorAction SilentlyContinue) `
+        'Get-LocalDesktopPath missing (needed to route Desktop shortcuts around OneDrive redirection)'
+    Assert-NotNull (Get-Command Get-LocalStartupPath -ErrorAction SilentlyContinue) `
+        'Get-LocalStartupPath missing (same purpose for the Startup folder)'
+    $p = Get-LocalDesktopPath
+    Assert-NotNull $p 'Get-LocalDesktopPath returned null'
+}
+
+Test 'install.ps1 writes desktop shortcut to local Desktop (not OneDrive)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    # Must call Get-LocalDesktopPath, not [Environment]::GetFolderPath directly
+    # for the Desktop lookup.
+    if ($c -notmatch 'Get-LocalDesktopPath') {
+        throw 'install.ps1 must use Get-LocalDesktopPath so shortcuts land on the LOCAL Desktop (never OneDrive)'
+    }
+    # And it should clean up stale OneDrive Desktop shortcuts.
+    if ($c -notmatch 'OneDrive\\Desktop') {
+        throw 'install.ps1 must delete stale grab.lnk from OneDrive\Desktop on install (migration cleanup)'
+    }
+}
+
+Test 'install.ps1 writes autostart to HKCU\Run and cleans stale OneDrive Startup' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -notmatch 'Set-AutostartRegistry') {
+        throw 'install.ps1 must call Set-AutostartRegistry to set the primary autostart entry'
+    }
+    if ($c -notmatch 'OneDrive\\Microsoft\\Windows\\Start Menu\\Programs\\Startup') {
+        throw 'install.ps1 must clean the stale OneDrive Startup shortcut on install'
+    }
+}
+
+Test 'install.ps1 sets tray promotion registry key' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -notmatch 'NotifyIconSettings') {
+        throw 'install.ps1 must set the HKCU\...\NotifyIconSettings promotion key (Windows 11 tray-hide-by-default fix)'
+    }
+    if ($c -notmatch 'IsPromoted') {
+        throw 'install.ps1 promotion write must set IsPromoted DWORD'
+    }
+}
+
+Test 'queue.ps1 Read-Queue checks WaitOne return value' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    # No more [void]$script:QueueMutex.WaitOne(...) discarding the return
+    if ($c -match '\[void\]\$script:QueueMutex\.WaitOne') {
+        throw 'Read-Queue must not discard the WaitOne return value with [void] -- audit P1-24'
+    }
+    # And Read-Queue must contain "mutex timeout" logging on failure
+    if ($c -notmatch 'Read-Queue[\s\S]{0,600}mutex timeout') {
+        throw 'Read-Queue must log a warn + bail on WaitOne timeout instead of proceeding without the lock'
+    }
+}
+Test 'queue.ps1 Write-Queue bails out on WaitOne timeout' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    if ($c -notmatch 'Write-Queue[\s\S]{0,900}mutex timeout[\s\S]{0,200}skipping write') {
+        throw 'Write-Queue must skip the write on WaitOne timeout to avoid lost-update races (audit P0-7)'
+    }
+}
+Test 'queue mutating functions take the mutex (audit P0-7)' {
+    # Set-JobStatus, Cancel-QueueJob, Retry-QueueJob, Recover-OrphanedJobs,
+    # Stop-AllJobs must all wrap their read-modify-write with the queue
+    # mutex. Uses AST to be robust against comments / whitespace.
+    $path = Join-Path $srcRoot 'queue.ps1'
+    $tokens = $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    $targets = @('Set-JobStatus','Cancel-QueueJob','Retry-QueueJob','Recover-OrphanedJobs','Stop-AllJobs')
+    $missing = @()
+    foreach ($fname in $targets) {
+        $fn = $ast.FindAll({
+            param($n)
+            $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fname
+        }, $true) | Select-Object -First 1
+        if (-not $fn) { $missing += "$fname (function not found)"; continue }
+        $body = $fn.Body.Extent.Text
+        # Must reference either _WithQueueMutex or QueueMutex.WaitOne
+        if ($body -notmatch '_WithQueueMutex' -and $body -notmatch 'QueueMutex\.WaitOne') {
+            $missing += $fname
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw ("queue.ps1 functions missing mutex protection: " + ($missing -join ', '))
+    }
+}
+
+Test 'settings.ps1 VersionLabel uses Get-GrabVersion (audit P0-4, P1-13)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    # Regression: VersionLabel used to bind to $cfg.version which drifted.
+    # Must now source from Get-GrabVersion, the single source of truth.
+    if ($c -notmatch 'VersionLabel[\s\S]{0,300}Get-GrabVersion') {
+        throw 'settings.ps1 VersionLabel must source from Get-GrabVersion (config field drifts)'
+    }
+}
+
+Test 'utils.ps1 has Test-IsOneDrivePath helper (OneDrive-safe folder detection)' {
+    Assert-NotNull (Get-Command Test-IsOneDrivePath -ErrorAction SilentlyContinue)
+    Assert-True (Test-IsOneDrivePath ('C:\Users\Someone\OneDrive\Desktop'))
+    Assert-True (-not (Test-IsOneDrivePath 'C:\Users\Someone\Desktop'))
+    Assert-True (Test-IsOneDrivePath ('D:\Users\A\Dropbox\Startup'))
+    Assert-True (-not (Test-IsOneDrivePath ''))
 }
 
 } finally {

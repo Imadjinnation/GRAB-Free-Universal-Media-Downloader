@@ -38,8 +38,16 @@ function Read-Queue {
     # Pipeline callers (Read-Queue | Where {...}) work naturally.
     # Do NOT use `,$arr` here -- it breaks pipeline usage by delivering the
     # whole array as ONE pipeline object instead of enumerating it.
+    # v0.3.0: WaitOne return + AbandonedMutexException are both checked
+    # (audit P1-24: pre-v0.3.0 we proceeded without a lock on timeout).
     $path = Get-QueuePath
-    [void]$script:QueueMutex.WaitOne(2000)
+    $acquired = $false
+    try { $acquired = $script:QueueMutex.WaitOne(2000) }
+    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) {
+        Log-Warn 'Read-Queue: mutex timeout after 2s; skipping read'
+        return
+    }
     try {
         if (-not (Test-Path $path)) { return }
         $raw = Get-Content $path -Raw -Encoding UTF8
@@ -52,21 +60,24 @@ function Read-Queue {
         if ($null -eq $arr) { return }
         # Emit one object at a time so downstream pipelines behave.
         $arr | ForEach-Object { $_ }
-    } finally { $script:QueueMutex.ReleaseMutex() }
+    } finally { try { $script:QueueMutex.ReleaseMutex() } catch {} }
 }
 
 function Write-Queue([array]$queue) {
     $path = Get-QueuePath
     Ensure-AppData
-    # WaitOne can return $false on timeout OR throw AbandonedMutexException if
-    # a prior owner exited without releasing (audit P0-3). Treat both as
-    # "keep going" -- writing is safer than dropping state, and the atomic
-    # rename inside Write-JsonAtomic keeps the on-disk file valid.
+    # WaitOne can return $false on timeout OR throw AbandonedMutexException
+    # if a prior owner exited without releasing (audit P0-3). v0.3.0: on
+    # timeout we now SKIP the write and log -- proceeding without the lock
+    # is what created the lost-update races the audit flagged (P0-7). The
+    # skipped write survives: the tick timer re-picks up whatever state
+    # existed on disk two seconds later.
     $acquired = $false
     try { $acquired = $script:QueueMutex.WaitOne(2000) }
     catch [System.Threading.AbandonedMutexException] { $acquired = $true }
     if (-not $acquired) {
-        Log-Warn 'Write-Queue: mutex timeout after 2s; writing anyway to avoid losing state'
+        Log-Warn 'Write-Queue: mutex timeout after 2s; skipping write to avoid lost-update race'
+        return
     }
     try {
         # Force array shape even for a single-element or empty queue -- callers
@@ -99,8 +110,31 @@ function Write-Queue([array]$queue) {
             Write-JsonAtomic -Path $path -Data $queue -Depth 6
         }
     } finally {
-        if ($acquired) { try { $script:QueueMutex.ReleaseMutex() } catch {} }
+        try { $script:QueueMutex.ReleaseMutex() } catch {}
     }
+}
+
+# ---------- Mutex-wrapped read-modify-write helper -----------------------
+# Every mutating call site (Set-JobStatus, Cancel-QueueJob, Retry-QueueJob,
+# Recover-OrphanedJobs, Stop-AllJobs) needs to (1) take the mutex,
+# (2) read queue, (3) mutate, (4) write, (5) release. Skipping the mutex
+# there produced the lost-update race the audit flagged (P0-7): a tick
+# timer read + Set-JobStatus running interleaved could clobber each other.
+# System.Threading.Mutex is re-entrant on the same thread, so calling
+# Read-Queue / Write-Queue inside a wrapped block just recurses safely.
+function _WithQueueMutex {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+    $acquired = $false
+    try { $acquired = $script:QueueMutex.WaitOne(2000) }
+    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) {
+        Log-Warn "queue mutex timeout in ${Name}; skipping"
+        return
+    }
+    try { & $Action } finally { try { $script:QueueMutex.ReleaseMutex() } catch {} }
 }
 
 # ---------- Public API ----------------------------------------------------
@@ -159,48 +193,67 @@ function Add-QueueJob {
 function Get-Queue { Read-Queue }
 
 function Set-JobStatus([string]$id, [hashtable]$updates) {
-    $queue = @(Read-Queue)
-    $changed = $false
-    for ($i = 0; $i -lt $queue.Count; $i++) {
-        if ($queue[$i].Id -eq $id) {
-            foreach ($k in $updates.Keys) { $queue[$i].$k = $updates[$k] }
-            $changed = $true
-            break
+    $result = $false
+    _WithQueueMutex -Name 'Set-JobStatus' -Action {
+        $queue = @(Read-Queue)
+        $changed = $false
+        for ($i = 0; $i -lt $queue.Count; $i++) {
+            if ($queue[$i].Id -eq $id) {
+                foreach ($k in $updates.Keys) { $queue[$i].$k = $updates[$k] }
+                $changed = $true
+                break
+            }
         }
+        if ($changed) { Write-Queue $queue }
+        $script:_SetJobStatusResult = $changed
     }
-    if ($changed) { Write-Queue $queue }
-    return $changed
+    if (Test-Path Variable:script:_SetJobStatusResult) {
+        $result = $script:_SetJobStatusResult
+        Remove-Variable -Name _SetJobStatusResult -Scope Script -ErrorAction SilentlyContinue
+    }
+    return $result
 }
 
 function Cancel-QueueJob([string]$id) {
-    $queue = @(Read-Queue)
-    foreach ($j in $queue) {
-        if ($j.Id -eq $id) {
-            if ($j.Status -eq 'running' -and $j.JobId) {
-                try { Stop-Job -Id $j.JobId -ErrorAction SilentlyContinue; Remove-Job -Id $j.JobId -Force -ErrorAction SilentlyContinue } catch {}
+    _WithQueueMutex -Name 'Cancel-QueueJob' -Action {
+        $queue = @(Read-Queue)
+        foreach ($j in $queue) {
+            if ($j.Id -eq $id) {
+                if ($j.Status -eq 'running' -and $j.JobId) {
+                    try { Stop-Job -Id $j.JobId -ErrorAction SilentlyContinue; Remove-Job -Id $j.JobId -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                $j.Status    = 'cancelled'
+                $j.StatusMsg = 'Cancelled by user'
+                $j.DoneAt    = (Get-Date).ToString('o')
+                break
             }
-            $j.Status    = 'cancelled'
-            $j.StatusMsg = 'Cancelled by user'
-            $j.DoneAt    = (Get-Date).ToString('o')
-            break
         }
+        Write-Queue $queue
     }
-    Write-Queue $queue
 }
 
 function Retry-QueueJob([string]$id) {
-    Set-JobStatus $id @{
-        Status      = 'pending'
-        StatusMsg   = 'Waiting to start'
-        StartedAt   = $null
-        DoneAt      = $null
-        DurationMs  = 0
-        FilesAdded  = 0
-        ToolUsed    = $null
-        UsedCookies = $null
-        Error       = $null
-        JobId       = $null
-    } | Out-Null
+    _WithQueueMutex -Name 'Retry-QueueJob' -Action {
+        # Inline the update so we get one mutex acquisition, not two
+        # (Set-JobStatus takes it again -- recursive is fine but slower).
+        $queue = @(Read-Queue)
+        for ($i = 0; $i -lt $queue.Count; $i++) {
+            if ($queue[$i].Id -eq $id) {
+                $queue[$i].Status      = 'pending'
+                $queue[$i].StatusMsg   = 'Waiting to start'
+                $queue[$i].StartedAt   = $null
+                $queue[$i].DoneAt      = $null
+                $queue[$i].DurationMs  = 0
+                $queue[$i].FilesAdded  = 0
+                $queue[$i].ToolUsed    = $null
+                $queue[$i].UsedCookies = $null
+                $queue[$i].Error       = $null
+                $queue[$i].JobId       = $null
+                Write-Queue $queue
+                break
+            }
+        }
+    }
 }
 
 function Clear-QueueDone {
@@ -432,32 +485,36 @@ function Recover-OrphanedJobs {
     # while a job was in-flight) back to 'pending' so the tick worker can
     # cleanly retry it. Without this, Invoke-QueueTick sees no matching PS
     # Job and marks them 'failed' with "Worker vanished" instead of retrying.
-    $queue = @(Read-Queue)
-    $changed = 0
-    foreach ($j in $queue) {
-        if ($j.Status -eq 'running') {
-            $j.Status    = 'pending'
-            $j.StatusMsg = 'Resuming after restart'
-            $j.StartedAt = $null
-            $j.JobId     = $null
-            $changed++
+    _WithQueueMutex -Name 'Recover-OrphanedJobs' -Action {
+        $queue = @(Read-Queue)
+        $changed = 0
+        foreach ($j in $queue) {
+            if ($j.Status -eq 'running') {
+                $j.Status    = 'pending'
+                $j.StatusMsg = 'Resuming after restart'
+                $j.StartedAt = $null
+                $j.JobId     = $null
+                $changed++
+            }
         }
-    }
-    if ($changed -gt 0) {
-        Write-Queue $queue
-        Log-Info "recovered $changed orphaned running job(s)"
+        if ($changed -gt 0) {
+            Write-Queue $queue
+            Log-Info "recovered $changed orphaned running job(s)"
+        }
     }
 }
 
 function Stop-AllJobs {
     # Called on app quit -- kill any running PS jobs cleanly.
-    $queue = @(Read-Queue)
-    foreach ($j in $queue) {
-        if ($j.Status -eq 'running' -and $j.JobId) {
-            try { Stop-Job -Id $j.JobId -ErrorAction SilentlyContinue; Remove-Job -Id $j.JobId -Force -ErrorAction SilentlyContinue } catch {}
-            $j.Status = 'pending'; $j.StatusMsg = 'Interrupted (will retry on next launch)'
-            $j.JobId = $null
+    _WithQueueMutex -Name 'Stop-AllJobs' -Action {
+        $queue = @(Read-Queue)
+        foreach ($j in $queue) {
+            if ($j.Status -eq 'running' -and $j.JobId) {
+                try { Stop-Job -Id $j.JobId -ErrorAction SilentlyContinue; Remove-Job -Id $j.JobId -Force -ErrorAction SilentlyContinue } catch {}
+                $j.Status = 'pending'; $j.StatusMsg = 'Interrupted (will retry on next launch)'
+                $j.JobId = $null
+            }
         }
+        Write-Queue $queue
     }
-    Write-Queue $queue
 }
