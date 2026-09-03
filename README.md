@@ -80,8 +80,7 @@ grab/
 │   ├── queue.ps1          background worker + queue state
 │   ├── tray.ps1           system tray, right-click menu, clipboard watch
 │   ├── popup.ps1          popup window controller
-│   ├── settings.ps1       settings window + first-run wizard
-│   └── drop.bat           drag-drop launcher wrapper
+│   └── settings.ps1       settings window + first-run wizard
 │
 ├── ui/                    WPF XAML markup (see ui/README.md)
 │   ├── popup.xaml
@@ -99,6 +98,41 @@ grab/
 ```
 
 **Runtime state** lives at `%APPDATA%\grab-app\` (never in the repo) — see [file-map.md](docs/file-map.md) for the full inventory.
+
+## Troubleshooting
+
+**Is grab running?**
+- Look for the icon in the system tray at the corner of your screen (may be under the `^` arrow — drag it out onto the taskbar to keep it visible).
+- Or open Task Manager (Ctrl+Shift+Esc) and search for `powershell.exe` running with `-File grab-app.ps1`.
+
+**How do I quit?**
+- Right-click the tray icon → **Quit**.
+
+**Where do my downloads go?**
+- Default: `D:\imadjinn-grab\` (if `D:\` exists) or `%USERPROFILE%\imadjinn-grab\`.
+- Change it in Settings → General → Download folder.
+- Downloads are laid out as `<downloadFolder>\<Category>\<Domain>\`. Sensitive downloads add a `.private\` (hidden) folder between category and domain.
+
+**Where does grab's state live?**
+- `%APPDATA%\grab-app\` — config, queue, recent history, logs, and per-engine download archives.
+
+**Something looks wrong — how do I clear the queue or start fresh?**
+- Clear the queue: right-click tray → **Restart tray** (drops any interrupted `running` entries and reloads state).
+- Reset settings: right-click tray → **Quit**, then delete `%APPDATA%\grab-app\config.json` and relaunch. GRAB will rewrite fresh defaults.
+- Full nuke: quit, then delete the entire `%APPDATA%\grab-app\` folder. Your downloads on disk are never touched.
+
+**Where are the logs?**
+- `%APPDATA%\grab-app\logs\grab-YYYY-MM-DD.log` (per-day, rotated at 5MB, pruned to 30 days).
+- Right-click tray → **Show logs** opens the folder in Explorer.
+- Right-click tray → **Copy diagnostics** puts the current config + last 100 log lines + version/PID on your clipboard — paste into a bug report.
+
+**Tray icon didn't show up after login?**
+- Autostart lives in two places: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GRAB` (primary) and, when your Startup folder isn't OneDrive-redirected, a `grab.lnk` shortcut in `shell:startup`. Re-run `install.ps1` to reset both.
+
+**"Nothing downloaded" every time?**
+- Open Settings → General → **cookie browser**: pick whichever browser you're actually logged into on the target site. `none` disables cookies entirely.
+- Try Settings → Advanced → **video quality**: `best` is the safest default; some sites reject specific ceilings.
+- Check the log for a specific engine error message.
 
 ## Where to look next
 

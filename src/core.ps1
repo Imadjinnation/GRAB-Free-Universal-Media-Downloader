@@ -320,9 +320,15 @@ function Invoke-PostProcess {
         Write-SeriesManifestsForLeaves -Url $Url -Tool $Tool -SeriesRoot $parent -ChapterLeaves $byParent[$parent]
     }
 
-    # Clean up per-image .info.json sidecars from yt-dlp
+    # Clean up per-image .info.json sidecars from yt-dlp.
+    # Audit P2-54: filter by CreationTime >= StartedAt so we only delete
+    # sidecars THIS run produced. Pre-v0.3.0 the sweep deleted every
+    # .info.json under $Dest (including those from a prior tool or a
+    # co-tenant series), which broke resume/inspect workflows for users
+    # who kept .info.json intentionally.
     if ($Tool -eq 'yt-dlp') {
         Get-ChildItem -LiteralPath $Dest -Recurse -Filter '*.info.json' -ErrorAction SilentlyContinue |
+            Where-Object { $_.CreationTime -ge $StartedAt } |
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }

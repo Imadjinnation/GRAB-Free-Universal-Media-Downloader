@@ -264,6 +264,44 @@
             <TextBlock Style="{StaticResource Caption}"
                        Text="Example: nhentai.net, allporncomic.com, e-hentai.org"/>
 
+            <!-- Audit P2-53: test-a-URL input. Type any URL here and click
+                 TEST to preview whether the current patterns above would
+                 flag it as sensitive. Never queues anything. -->
+            <TextBlock Style="{StaticResource FieldLabel}"
+                       Text="Test a URL against the patterns above:"
+                       Margin="0,12,0,6"/>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Border Grid.Column="0" CornerRadius="4"
+                      Background="{StaticResource CardHi}"
+                      BorderBrush="{StaticResource Cyan}"
+                      BorderThickness="1">
+                <TextBox x:Name="SensitiveTestUrl"
+                         Background="Transparent"
+                         Foreground="{StaticResource Text}"
+                         BorderThickness="0"
+                         CaretBrush="#FF2D8C"
+                         SelectionBrush="#FF2D8C"
+                         SelectionOpacity="0.35"
+                         FontFamily="__GRAB_FONTS__#Inter"
+                         FontSize="12"
+                         Padding="10,7"/>
+              </Border>
+              <Button Grid.Column="1" x:Name="SensitiveTestBtn"
+                      Style="{StaticResource ArcadeGhost}"
+                      Content="TEST"
+                      Width="80"
+                      Margin="8,0,0,0"/>
+            </Grid>
+            <TextBlock x:Name="SensitiveTestResult"
+                       Foreground="{StaticResource TextMuted}"
+                       FontFamily="__GRAB_FONTS__#VT323"
+                       FontSize="12"
+                       Margin="0,6,0,0"/>
+
             <!-- Startup section -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="STARTUP"/>
             <Border Height="1" Background="{StaticResource Cyan}" Opacity="0.35" Margin="0,-4,0,10"/>

@@ -384,6 +384,164 @@ $script:ConfirmDialogXaml = @'
 </Window>
 '@
 
+$script:ConfirmDownloadXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="grab confirm download"
+        Width="520" Height="320"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+  <Window.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="__GRAB_THEME__"/>
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Window.Resources>
+  <Grid Margin="14" x:Name="ConfirmDlRoot">
+    <Border CornerRadius="14"
+            Background="{StaticResource Ground}"
+            BorderBrush="{StaticResource Amber}"
+            BorderThickness="1">
+      <Border.Effect>
+        <DropShadowEffect Color="Black" BlurRadius="60" ShadowDepth="30" Opacity="0.5"/>
+      </Border.Effect>
+      <Border CornerRadius="14"
+              BorderThickness="1"
+              BorderBrush="#0DFF2E93"
+              ClipToBounds="True">
+      <Grid x:Name="ConfirmDlHeader" Margin="24,20,24,20" Background="#01000000">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0"
+                   FontFamily="__GRAB_FONTS__#Silkscreen" FontWeight="Bold" FontSize="14"
+                   Foreground="{StaticResource Amber}"
+                   Text="CONFIRM GRAB"/>
+        <TextBlock Grid.Row="1" x:Name="DlUrl"
+                   Foreground="{StaticResource Text}"
+                   FontFamily="__GRAB_FONTS__#VT323"
+                   FontSize="14"
+                   TextWrapping="Wrap"
+                   Margin="0,10,0,0"/>
+        <TextBlock Grid.Row="2" x:Name="DlDest"
+                   Foreground="{StaticResource TextMuted}"
+                   FontFamily="__GRAB_FONTS__#VT323"
+                   FontSize="12"
+                   TextWrapping="Wrap"
+                   Margin="0,6,0,0"/>
+        <TextBlock Grid.Row="3" x:Name="DlSensitive"
+                   Foreground="#FF2D8C"
+                   FontFamily="__GRAB_FONTS__#VT323"
+                   FontSize="12"
+                   Margin="0,6,0,0"/>
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+          <Button x:Name="DlCancel" Style="{StaticResource ArcadeGhost}"  Content="CANCEL"        Width="90"  Margin="0,0,8,0"/>
+          <Button x:Name="DlChoose" Style="{StaticResource ArcadeGhost}"  Content="CHOOSE FOLDER" Width="140" Margin="0,0,8,0"/>
+          <Button x:Name="DlGrab"   Style="{StaticResource ArcadePrimary}" Content="GRAB IT"       Width="120"/>
+        </StackPanel>
+      </Grid>
+      </Border>
+    </Border>
+    <Rectangle x:Name="ScanlinesOverlay"
+               IsHitTestVisible="False"
+               Panel.ZIndex="999"
+               Opacity="0.14">
+      <Rectangle.Fill>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="0,3"
+                             MappingMode="Absolute" SpreadMethod="Repeat">
+          <GradientStop Offset="0"    Color="#40FFFFFF"/>
+          <GradientStop Offset="0.5"  Color="#40FFFFFF"/>
+          <GradientStop Offset="0.5"  Color="#00000000"/>
+          <GradientStop Offset="1"    Color="#00000000"/>
+        </LinearGradientBrush>
+      </Rectangle.Fill>
+    </Rectangle>
+  </Grid>
+</Window>
+'@
+
+function Confirm-DownloadDialog {
+    # Audit P2-40 (option B: implement AskBeforeEach). Modal per-download
+    # confirmation: shows URL + destination + sensitive-toggle state, then
+    # returns a hashtable:
+    #   @{ Cancelled = $true }                       -- user picked CANCEL
+    #   @{ Cancelled = $false; Override = $null }    -- user picked GRAB IT (use default dest)
+    #   @{ Cancelled = $false; Override = 'C:\...' } -- user picked CHOOSE FOLDER
+    # The Override, when set, is a one-time destination for THIS submission;
+    # config.downloadFolder is not touched.
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Dest,
+        [bool]$Sensitive = $false,
+        $Owner = $null
+    )
+    try {
+        Ensure-WpfLoaded
+        $xamlText = _ApplyGrabTokens $script:ConfirmDownloadXaml
+        try {
+            $w = [Windows.Markup.XamlReader]::Parse($xamlText)
+        } catch {
+            Log-Err "Confirm-download dialog XAML parse failed: $($_.Exception.Message)"
+            # If we can't render the dialog, err on the side of NOT downloading
+            # so a UI failure never quietly queues without consent.
+            return @{ Cancelled = $true; Override = $null }
+        }
+        $w.FindName('DlUrl').Text  = "URL: $Url"
+        $w.FindName('DlDest').Text = "Dest: $Dest"
+        $sensText = if ($Sensitive) { "Sensitive: ON  (routes to .private)" } else { "Sensitive: off" }
+        $w.FindName('DlSensitive').Text = $sensText
+        $header = $w.FindName('ConfirmDlHeader')
+        $scan   = $w.FindName('ScanlinesOverlay')
+        try {
+            $cfg = Get-Config
+            if ($scan -and -not $cfg.crtScanlines) { $scan.Visibility = 'Collapsed' }
+        } catch {}
+        $winLocal = $w
+        $header.Add_MouseLeftButtonDown({ $winLocal.DragMove() }.GetNewClosure())
+
+        $result = @{ Cancelled = $true; Override = $null }
+        $resultRef = [ref]$result
+
+        $w.FindName('DlCancel').Add_Click({
+            $resultRef.Value = @{ Cancelled = $true; Override = $null }
+            $winLocal.Close()
+        }.GetNewClosure())
+        $w.FindName('DlGrab').Add_Click({
+            $resultRef.Value = @{ Cancelled = $false; Override = $null }
+            $winLocal.Close()
+        }.GetNewClosure())
+        $w.FindName('DlChoose').Add_Click({
+            Add-Type -AssemblyName System.Windows.Forms | Out-Null
+            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dlg.Description = 'One-time destination for THIS download'
+            $dlg.ShowNewFolderButton = $true
+            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                $resultRef.Value = @{ Cancelled = $false; Override = $dlg.SelectedPath }
+                $winLocal.Close()
+            }
+        }.GetNewClosure())
+
+        if ($Owner) { $w.Owner = $Owner }
+        $w.ShowDialog() | Out-Null
+        return $resultRef.Value
+    } catch {
+        Log-Err "Confirm-DownloadDialog failed: $($_.Exception.Message)"
+        return @{ Cancelled = $true; Override = $null }
+    }
+}
+
 function Confirm-ArcadeDialog {
     # Arcade-styled Yes/No modal. Replaces MessageBox.Show for any user
     # decision inside GRAB. Returns [bool]: $true on YES, $false on CANCEL
@@ -414,10 +572,17 @@ function Confirm-ArcadeDialog {
         $no  = $w.FindName('NoBtn');  $no.Content  = $NoLabel
         $header = $w.FindName('DlgHeader')
         $scan = $w.FindName('ScanlinesOverlay')
+        # Audit P2-43: don't swallow the config-read error. If Get-Config
+        # throws, we default to leaving the scanlines visible (the arcade
+        # cabinet default) AND log the error so the underlying issue is
+        # traceable instead of the visible symptom being "scanlines showing
+        # even though I turned them off".
         try {
             $cfg = Get-Config
             if ($scan -and -not $cfg.crtScanlines) { $scan.Visibility = 'Collapsed' }
-        } catch {}
+        } catch {
+            Log-Warn "Confirm-ArcadeDialog: Get-Config failed, keeping scanlines default: $($_.Exception.Message)"
+        }
         # Drag on header
         $winLocal = $w
         $header.Add_MouseLeftButtonDown({ $winLocal.DragMove() }.GetNewClosure())
@@ -530,11 +695,14 @@ function Show-AboutWindow {
         $scan   = $w.FindName('ScanlinesOverlay')
         _AddAboutBodyRuns $body
         if ($footer) { $footer.Text = $script:AboutFooter }
-        # Honor the config.crtScanlines toggle.
+        # Honor the config.crtScanlines toggle. Audit P2-43: log the
+        # swallowed error so the wrong-default symptom is diagnosable.
         try {
             $cfg = Get-Config
             if ($scan -and -not $cfg.crtScanlines) { $scan.Visibility = 'Collapsed' }
-        } catch {}
+        } catch {
+            Log-Warn "Show-AboutWindow: Get-Config failed, keeping scanlines default: $($_.Exception.Message)"
+        }
         # Drag anywhere on the card (WindowStyle=None gives no titlebar).
         $winLocal = $w
         $hdr.Add_MouseLeftButtonDown({ $winLocal.DragMove() }.GetNewClosure())
@@ -688,7 +856,17 @@ function Build-TrayMenu {
     $mDiag     = $menu.Items.Add('Copy diagnostics', $null, { _CopyDiagnostics })
     $mRestart  = $menu.Items.Add('Restart tray',     $null, { _RestartTray })
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-    $mAbout    = $menu.Items.Add('About',          $null, { Show-AboutWindow })
+    # Audit P2-42: About handler used to swallow XAML parse / dispatcher
+    # errors silently -- the user clicked About, nothing happened, no clue.
+    # Now: try/catch, log with stack trace, and toast so the user has a
+    # nudge to check the log.
+    $mAbout    = $menu.Items.Add('About',          $null, {
+        try { Show-AboutWindow }
+        catch {
+            Log-Err "Show-AboutWindow click failed: $($_.Exception.Message)"
+            try { Send-Toast 'grab' 'Could not open About; check the log' } catch {}
+        }
+    })
     $mQuit     = $menu.Items.Add('Quit',           $null, { Stop-Tray })
 
     # Bold "Show grab" as default
@@ -697,6 +875,105 @@ function Build-TrayMenu {
 }
 
 # ---------- Timers --------------------------------------------------------
+
+# Audit PERF-1/PERF-2 tick intervals. TickTimer defaults to 2s (fast enough
+# for a responsive queue). When the queue is idle for >5min we back off to
+# 30s so an unused GRAB draws almost no CPU. On battery we tighten a bit
+# more (15s) so the laptop doesn't wake the disk unnecessarily.
+$script:TickIntervalFast   = [TimeSpan]::FromSeconds(2)
+$script:TickIntervalBattery = [TimeSpan]::FromSeconds(15)
+$script:TickIntervalIdle    = [TimeSpan]::FromSeconds(30)
+$script:LastQueueActivityAt = Get-Date
+$script:OnBattery           = $false
+$script:BatterySaverOn      = $false
+
+function Get-DesiredTickInterval {
+    # Priority: activity within 5min -> fast; else battery/saver -> battery;
+    # else idle (30s). Callers use this to pick an interval before Start().
+    $now = Get-Date
+    $idleFor = $now - $script:LastQueueActivityAt
+    $qCount = 0
+    try { $qCount = @(Read-Queue).Count } catch {}
+    if ($idleFor.TotalMinutes -lt 5 -or $qCount -gt 0) { return $script:TickIntervalFast }
+    if ($script:BatterySaverOn -or $script:OnBattery) { return $script:TickIntervalBattery }
+    return $script:TickIntervalIdle
+}
+
+function Notify-QueueActivity {
+    # Called from anywhere that changes queue state (Add-QueueJob, job
+    # completion) so the TickTimer resets to fast. Also called on startup.
+    $script:LastQueueActivityAt = Get-Date
+    if ($script:TickTimer -and $script:TickTimer.Interval -ne $script:TickIntervalFast) {
+        $script:TickTimer.Interval = $script:TickIntervalFast
+    }
+}
+
+function Update-TickInterval {
+    # Called by the tick handler after Invoke-QueueTick; adjusts the timer
+    # interval based on current conditions (idle, battery, saver mode).
+    if (-not $script:TickTimer) { return }
+    $desired = Get-DesiredTickInterval
+    if ($script:TickTimer.Interval -ne $desired) {
+        $script:TickTimer.Interval = $desired
+    }
+}
+
+function _DetectBatteryLine {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        $ps = [System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus
+        # 'Offline' means "no AC" -> running on battery.
+        return ($ps -eq [System.Windows.Forms.PowerLineStatus]::Offline)
+    } catch { return $false }
+}
+
+function Sync-ClipTimer {
+    # Audit P2-50 / PERF-4: start ClipTimer if config says clipboardWatch=on
+    # AND it isn't already running; stop it if it's running but the toggle
+    # went off. Called at Start-Timers and again from Settings Save.
+    try {
+        $cfg = Get-Config
+        $wantOn = [bool]$cfg.clipboardWatch
+    } catch { $wantOn = $false }
+    if ($wantOn) {
+        if (-not $script:ClipTimer) {
+            $script:ClipTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:ClipTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
+            $script:ClipTimer.Add_Tick({
+                try {
+                    $c = Get-Config
+                    if (-not $c.clipboardWatch) {
+                        # Toggled off between ticks; stop right now.
+                        try { $script:ClipTimer.Stop() } catch {}
+                        return
+                    }
+                    $txt = try { [System.Windows.Forms.Clipboard]::GetText() } catch { '' }
+                    if ($txt -and $txt -ne $script:LastClipboardUrl -and (Test-IsUrl $txt)) {
+                        $script:LastClipboardUrl = $txt
+                        Send-Toast 'URL detected' "Click the tray icon to grab: $(Get-SiteName $txt)"
+                        if ($script:Tray) {
+                            $script:Tray.ShowBalloonTip(4000, 'grab', "Detected: $(Get-SiteName $txt)`nClick the tray icon to add it.", [System.Windows.Forms.ToolTipIcon]::Info)
+                        }
+                    }
+                    $script:ClipFailCount = 0
+                } catch {
+                    $script:ClipFailCount++
+                    Log-Err "clip tick error #$($script:ClipFailCount): $($_.Exception.Message)"
+                    if ($script:ClipFailCount -ge 10) {
+                        try { $script:ClipTimer.Stop() } catch {}
+                        try { Send-Toast 'grab clipboard watch halted' 'Too many errors -- check the log' } catch {}
+                        Log-Err 'clipboard watch timer stopped after 10 consecutive failures'
+                    }
+                }
+            })
+        }
+        if (-not $script:ClipTimer.IsEnabled) { $script:ClipTimer.Start() }
+    } else {
+        if ($script:ClipTimer -and $script:ClipTimer.IsEnabled) {
+            try { $script:ClipTimer.Stop() } catch {}
+        }
+    }
+}
 
 function Start-Timers {
     # We use WPF DispatcherTimer instead of WinForms.Timer because the main
@@ -711,13 +988,28 @@ function Start-Timers {
     $script:TickFailCount = 0
     $script:ClipFailCount = 0
 
-    # Queue tick every 2s
+    # Turn on batched log writes (audit PERF-3). Write-Log now enqueues; the
+    # LogFlushTimer below drains every 1s.
+    Enable-LogBatching
+
+    # Detect battery once at startup; PowerModeChanged (below) keeps it fresh.
+    $script:OnBattery = _DetectBatteryLine
+
+    # Queue tick with adaptive interval (audit PERF-1 / PERF-2).
     $script:TickTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:TickTimer.Interval = [TimeSpan]::FromSeconds(2)
+    $script:TickTimer.Interval = Get-DesiredTickInterval
     $script:TickTimer.Add_Tick({
         try {
+            $before = try { @(Read-Queue).Count } catch { -1 }
             Invoke-QueueTick
+            $after  = try { @(Read-Queue).Count } catch { -1 }
+            # Any state churn resets activity so we stay on the fast interval
+            # while the queue is doing work.
+            if ($before -ne $after -or $after -gt 0) {
+                $script:LastQueueActivityAt = Get-Date
+            }
             $script:TickFailCount = 0
+            Update-TickInterval
         } catch {
             $script:TickFailCount++
             Log-Err "tick error #$($script:TickFailCount): $($_.Exception.Message)"
@@ -730,38 +1022,65 @@ function Start-Timers {
     })
     $script:TickTimer.Start()
 
-    # Clipboard watch every 1.5s (opt-in via config)
-    $script:ClipTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:ClipTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
-    $script:ClipTimer.Add_Tick({
-        try {
-            $cfg = Get-Config
-            if (-not $cfg.clipboardWatch) { $script:ClipFailCount = 0; return }
-            $txt = try { [System.Windows.Forms.Clipboard]::GetText() } catch { '' }
-            if ($txt -and $txt -ne $script:LastClipboardUrl -and (Test-IsUrl $txt)) {
-                $script:LastClipboardUrl = $txt
-                Send-Toast 'URL detected' "Click the tray icon to grab: $(Get-SiteName $txt)"
-                if ($script:Tray) {
-                    $script:Tray.ShowBalloonTip(4000, 'grab', "Detected: $(Get-SiteName $txt)`nClick the tray icon to add it.", [System.Windows.Forms.ToolTipIcon]::Info)
+    # Clipboard watch: only start when clipboardWatch=true (PERF-4 / P2-50).
+    Sync-ClipTimer
+
+    # Log flush timer (PERF-3). Drains the batched log queue every 1s.
+    $script:LogFlushTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:LogFlushTimer.Interval = [TimeSpan]::FromSeconds(1)
+    $script:LogFlushTimer.Add_Tick({ try { Flush-LogQueue } catch {} })
+    $script:LogFlushTimer.Start()
+
+    # Battery / power-mode awareness (PERF-2). PowerModeChanged fires for
+    # StatusChange (battery <-> AC transitions, battery-saver toggle) and
+    # Suspend/Resume. We pause the queue tick on Suspend and refresh the
+    # battery/saver flags on StatusChange so Update-TickInterval picks up
+    # the change on the next tick.
+    try {
+        $handler = {
+            param($senderObj, $e)
+            try {
+                switch ($e.Mode) {
+                    ([Microsoft.Win32.PowerModes]::Suspend) {
+                        try { $script:TickTimer.Stop() } catch {}
+                        try { if ($script:ClipTimer) { $script:ClipTimer.Stop() } } catch {}
+                        Log-Info 'power: suspend -- timers paused'
+                    }
+                    ([Microsoft.Win32.PowerModes]::Resume) {
+                        $script:OnBattery = _DetectBatteryLine
+                        try { $script:TickTimer.Start() } catch {}
+                        try { Sync-ClipTimer } catch {}
+                        Log-Info 'power: resume -- timers restarted'
+                    }
+                    ([Microsoft.Win32.PowerModes]::StatusChange) {
+                        $script:OnBattery = _DetectBatteryLine
+                        # Windows battery-saver mode isn't cleanly readable
+                        # from managed APIs, but StatusChange fires when it
+                        # toggles -- treat "on battery AND idle >5min" as
+                        # the same tightening.
+                        Update-TickInterval
+                        Log-Info "power: status change (battery=$script:OnBattery)"
+                    }
                 }
-            }
-            $script:ClipFailCount = 0
-        } catch {
-            $script:ClipFailCount++
-            Log-Err "clip tick error #$($script:ClipFailCount): $($_.Exception.Message)"
-            if ($script:ClipFailCount -ge 10) {
-                try { $script:ClipTimer.Stop() } catch {}
-                try { Send-Toast 'grab clipboard watch halted' 'Too many errors -- check the log' } catch {}
-                Log-Err 'clipboard watch timer stopped after 10 consecutive failures'
-            }
+            } catch { Log-Warn "PowerModeChanged handler: $($_.Exception.Message)" }
         }
-    })
-    $script:ClipTimer.Start()
+        [Microsoft.Win32.SystemEvents]::add_PowerModeChanged($handler)
+        $script:PowerModeHandler = $handler
+    } catch { Log-Warn "PowerModeChanged wire-up failed: $($_.Exception.Message)" }
 }
 
 function Stop-Timers {
-    if ($script:TickTimer) { $script:TickTimer.Stop() }
-    if ($script:ClipTimer) { $script:ClipTimer.Stop() }
+    if ($script:TickTimer)     { try { $script:TickTimer.Stop() }     catch {} }
+    if ($script:ClipTimer)     { try { $script:ClipTimer.Stop() }     catch {} }
+    if ($script:LogFlushTimer) { try { $script:LogFlushTimer.Stop() } catch {} }
+    # Unhook the PowerModeChanged handler so we don't leak it across restarts.
+    if ($script:PowerModeHandler) {
+        try { [Microsoft.Win32.SystemEvents]::remove_PowerModeChanged($script:PowerModeHandler) } catch {}
+        $script:PowerModeHandler = $null
+    }
+    # Flush any pending log entries before we lose the ability to drain.
+    try { Flush-LogQueue } catch {}
+    try { Disable-LogBatching } catch {}
 }
 
 # ---------- Lifecycle -----------------------------------------------------
@@ -840,8 +1159,12 @@ function Start-Tray {
     # anyone who already saw the pin dialog once).
     $cfg = Get-Config
     if (-not $cfg.firstRunComplete) {
+        # Audit P2-48: don't assume taskbar orientation. Users with a
+        # top/side/auto-hide taskbar wouldn't recognise "bottom-right" as
+        # a location. "At the corner of your screen (may be under the ^
+        # arrow)" is orientation-neutral.
         $script:Tray.ShowBalloonTip(8000, 'grab is ready',
-            "I live in your tray. Left-click me to paste a link; right-click for menu.`n`nTip: drag me out of the up-caret onto the taskbar so I'm always visible.",
+            "I live in the system tray at the corner of your screen (may be under the ^ arrow). Left-click me to paste a link; right-click for menu.`n`nTip: drag me out of the up-caret onto the taskbar so I'm always visible.",
             [System.Windows.Forms.ToolTipIcon]::Info)
         Update-Config @{ firstRunComplete = $true } | Out-Null
     }

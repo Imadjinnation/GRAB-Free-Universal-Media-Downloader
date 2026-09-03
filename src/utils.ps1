@@ -175,6 +175,11 @@ function Get-LocalStartupPath {
     # Same story as Desktop -- Startup can be redirected into OneDrive
     # (rare but happens with folder-move policies), which makes autostart
     # shortcuts fragile. Prefer the real local Startup path.
+    #
+    # Audit P2-57: tests used to touch the user's real Startup folder. If
+    # GRAB_STARTUP_OVERRIDE is set (only in test contexts), return it verbatim
+    # so Set-Autostart writes into an ephemeral temp folder instead.
+    if ($env:GRAB_STARTUP_OVERRIDE) { return $env:GRAB_STARTUP_OVERRIDE }
     $shell = [Environment]::GetFolderPath('Startup')
     if ($shell -and -not (Test-IsOneDrivePath $shell)) { return $shell }
     $local = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
@@ -444,6 +449,41 @@ $script:LogMaxBytes    = 5MB
 $script:LogKeepDays    = 30
 $script:LogRotateCheck = 0     # last tick counter; rotates every 20 writes
 
+# Audit PERF-3: batched log flush. Write-Log used to Add-Content on every
+# call (one open + fsync per line -- expensive during a burst of queue
+# ticks). Now Write-Log enqueues into a concurrent queue, and a dispatcher
+# timer (started from Start-Timers in tray.ps1) drains it every 1s. Callers
+# that need the log flushed immediately (Stop-Tray on shutdown) call
+# Flush-LogQueue.
+$script:LogQueue    = $null
+$script:LogBatching = $false
+function _EnsureLogQueue {
+    if ($null -eq $script:LogQueue) {
+        $script:LogQueue = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    }
+}
+function Enable-LogBatching { _EnsureLogQueue; $script:LogBatching = $true }
+function Disable-LogBatching { $script:LogBatching = $false; Flush-LogQueue }
+function Flush-LogQueue {
+    _EnsureLogQueue
+    if ($script:LogQueue.Count -eq 0) { return }
+    # Group by target file so we open each per-day log at most once per flush.
+    $buckets = @{}
+    $item = $null
+    while ($script:LogQueue.TryDequeue([ref]$item)) {
+        $key = $item.File
+        if (-not $buckets.ContainsKey($key)) { $buckets[$key] = New-Object System.Collections.Generic.List[string] }
+        [void]$buckets[$key].Add($item.Line)
+    }
+    foreach ($k in $buckets.Keys) {
+        try {
+            Add-Content -Path $k -Value ($buckets[$k]) -Encoding UTF8
+        } catch {
+            # Never let a log write bring down a caller; drop the batch quietly.
+        }
+    }
+}
+
 function _RotateLogIfNeeded([string]$file) {
     try {
         if (Test-Path -LiteralPath $file) {
@@ -483,10 +523,21 @@ function Write-Log([string]$level, [string]$msg) {
     if (($script:LogRotateCheck % 50) -eq 0) { _RotateLogIfNeeded $file }
     if ($script:LogRotateCheck -eq 0)         { _PruneOldLogs }
     $stamp = Get-Date -Format 'HH:mm:ss'
-    # Redact tokens / auth params from URLs before they hit the log (audit low-19).
-    $sanitized = $msg -replace '([?&](?:token|auth|password|api_key|apikey|sig|signature)=)[^&\s]+','${1}REDACTED'
+    # Audit P2-55: redact wider list of secret-shaped query params from URLs
+    # before they hit the log. Extended vocabulary catches bearer tokens,
+    # JWTs, OAuth/access/id tokens, session cookies, AWS signed-URL params,
+    # etc. Kept in one alternation so the whole match+replace stays one pass.
+    $sanitized = $msg -replace `
+        '([?&](?:token|auth|password|api[_-]?key|apikey|sig|signature|bearer|access[_-]?token|id[_-]?token|oauth[_-]?token|sess(?:ion)?|jwt|code|X-Amz-[A-Za-z-]+)=)[^&\s]+','${1}REDACTED'
     $line = "$stamp [$level] $sanitized"
-    Add-Content -Path $file -Value $line -Encoding UTF8
+    # Audit PERF-3: when batching is on (started from Start-Timers), enqueue
+    # instead of writing synchronously. A 1s dispatcher timer drains the queue.
+    if ($script:LogBatching) {
+        _EnsureLogQueue
+        [void]$script:LogQueue.Enqueue([pscustomobject]@{ File = $file; Line = $line })
+    } else {
+        Add-Content -Path $file -Value $line -Encoding UTF8
+    }
 }
 
 function Log-Info ([string]$msg) { Write-Log 'INFO'  $msg }
@@ -518,6 +569,16 @@ function Send-Toast([string]$title, [string]$body, [string]$action = $null) {
 
 function Test-IsUrl([string]$s) {
     return $s -match '^https?://\S+$'
+}
+
+function Get-RedactedUrl([string]$u) {
+    # Audit P2-56: recent.json used to store URLs verbatim, including any
+    # ?token=... / signed-URL params. This helper applies the same redaction
+    # rule as Write-Log (kept in lock-step deliberately) so Recent entries
+    # never leak short-lived credentials to whoever opens the JSON.
+    if ($null -eq $u) { return '' }
+    return ($u -replace `
+        '([?&](?:token|auth|password|api[_-]?key|apikey|sig|signature|bearer|access[_-]?token|id[_-]?token|oauth[_-]?token|sess(?:ion)?|jwt|code|X-Amz-[A-Za-z-]+)=)[^&\s]+','${1}REDACTED')
 }
 
 function Get-SiteName([string]$u) {

@@ -29,6 +29,27 @@
 # queue.json is read/written from multiple call sites; a mutex serializes access.
 $script:QueueMutex = New-Object System.Threading.Mutex($false, 'Global\GrabAppQueueMutex')
 
+# Audit P2-36: recent.json is also mutated by two paths (Append-Recent from
+# the queue tick after a job finishes; Clear-Recent from popup buttons). A
+# dedicated named mutex serializes those two so a completing job doesn't
+# race a manual "Clear all" click.
+$script:RecentMutex = New-Object System.Threading.Mutex($false, 'Global\GrabAppRecentMutex')
+
+function _WithRecentMutex {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+    $acquired = $false
+    try { $acquired = $script:RecentMutex.WaitOne(2000) }
+    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) {
+        Log-Warn "recent mutex timeout in ${Name}; skipping"
+        return
+    }
+    try { & $Action } finally { try { $script:RecentMutex.ReleaseMutex() } catch {} }
+}
+
 function Read-Queue {
     # Emits queue entries using standard PS enumeration semantics:
     #   - empty state -> emits nothing
@@ -80,34 +101,26 @@ function Write-Queue([array]$queue) {
         return
     }
     try {
-        # Force array shape even for a single-element or empty queue -- callers
-        # depend on queue.json being a JSON array.
+        # Audit P2-38: force array shape for every queue.json write.
+        # ConvertTo-Json on a single PSCustomObject produces a bare object,
+        # not an array; on an empty array it can produce nothing. So we
+        # normalise: serialize each entry individually, then join with
+        # commas inside brackets. This is the same shape Read-Queue expects
+        # regardless of Count (0, 1, or many).
         if ($queue.Count -eq 0) {
-            # Write an empty array atomically. Write-JsonAtomic emits an
-            # object; use a raw file write for the empty-array shape.
-            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            $tmp = "$path.tmp"
-            [System.IO.File]::WriteAllText($tmp, '[]', $utf8NoBom)
-            if (Test-Path -LiteralPath $path) {
-                [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
-            } else {
-                [System.IO.File]::Move($tmp, $path)
-            }
-        } elseif ($queue.Count -eq 1) {
-            # ConvertTo-Json on a single object produces an object, not an
-            # array. Wrap manually so downstream Read-Queue still sees []...
-            $json = $queue | ConvertTo-Json -Depth 6
-            if ($json -notmatch '^\s*\[') { $json = "[$json]" }
-            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            $tmp = "$path.tmp"
-            [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
-            if (Test-Path -LiteralPath $path) {
-                [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
-            } else {
-                [System.IO.File]::Move($tmp, $path)
-            }
+            $json = '[]'
         } else {
-            Write-JsonAtomic -Path $path -Data $queue -Depth 6
+            $parts = @()
+            foreach ($item in $queue) { $parts += ($item | ConvertTo-Json -Depth 6) }
+            $json = '[' + ($parts -join ',') + ']'
+        }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $tmp = "$path.tmp"
+        [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
+        if (Test-Path -LiteralPath $path) {
+            [GrabApp.AtomicIO]::ReplaceMove($tmp, $path)
+        } else {
+            [System.IO.File]::Move($tmp, $path)
         }
     } finally {
         try { $script:QueueMutex.ReleaseMutex() } catch {}
@@ -187,6 +200,12 @@ function Add-QueueJob {
         Log-Info ("queued " + $u + $(if ($Sensitive) { ' [SENSITIVE]' } else { '' }))
     }
     Write-Queue $queue
+    # Audit PERF-1: notify the tray so its adaptive TickTimer resets to
+    # the fast interval whenever new work arrives. Guarded so queue.ps1
+    # still works when dot-sourced from a test without a running tray.
+    if ($added -gt 0 -and (Get-Command Notify-QueueActivity -ErrorAction SilentlyContinue)) {
+        try { Notify-QueueActivity } catch {}
+    }
     return $added
 }
 
@@ -215,6 +234,12 @@ function Set-JobStatus([string]$id, [hashtable]$updates) {
 }
 
 function Cancel-QueueJob([string]$id) {
+    # Audit P2-41: only Write-Queue when we actually mutated something. The
+    # pre-v0.3.0 body always wrote back, which meant a Cancel for an id that
+    # was already gone (e.g. clicked twice, race with tick) still spent one
+    # atomic replace + mutex acquisition. Also return $true/$false so callers
+    # can tell success from "id not found".
+    $mutated = $false
     _WithQueueMutex -Name 'Cancel-QueueJob' -Action {
         $queue = @(Read-Queue)
         foreach ($j in $queue) {
@@ -225,11 +250,17 @@ function Cancel-QueueJob([string]$id) {
                 $j.Status    = 'cancelled'
                 $j.StatusMsg = 'Cancelled by user'
                 $j.DoneAt    = (Get-Date).ToString('o')
+                $script:_CancelMutated = $true
                 break
             }
         }
-        Write-Queue $queue
+        if ($script:_CancelMutated) { Write-Queue $queue }
     }
+    if (Test-Path Variable:script:_CancelMutated) {
+        $mutated = [bool]$script:_CancelMutated
+        Remove-Variable -Name _CancelMutated -Scope Script -ErrorAction SilentlyContinue
+    }
+    return $mutated
 }
 
 function Retry-QueueJob([string]$id) {
@@ -265,27 +296,38 @@ function Clear-QueueDone {
 # ---------- Recent list ---------------------------------------------------
 
 function Append-Recent([object]$job) {
-    $path = Get-RecentPath
-    Ensure-AppData
-    $recent = if (Test-Path $path) {
-        $raw = Get-Content $path -Raw -Encoding UTF8
-        if ($raw) { @($raw | ConvertFrom-Json) } else { @() }
-    } else { @() }
-    $entry = [PSCustomObject]@{
-        Url         = $job.Url
-        Dest        = $job.Dest
-        DoneAt      = $job.DoneAt
-        Status      = $job.Status
-        FilesAdded  = $job.FilesAdded
-        ToolUsed    = $job.ToolUsed
-        DurationMs  = $job.DurationMs
-        Error       = $job.Error
+    # Audit P2-36: serialize with _WithRecentMutex so a concurrent Clear-Recent
+    # click can't race the append.
+    _WithRecentMutex -Name 'Append-Recent' -Action {
+        $path = Get-RecentPath
+        Ensure-AppData
+        $recent = if (Test-Path $path) {
+            $raw = Get-Content $path -Raw -Encoding UTF8
+            if ($raw) { @($raw | ConvertFrom-Json) } else { @() }
+        } else { @() }
+        $entry = [PSCustomObject]@{
+            # Audit P2-56: redact tokens / signed-URL params before persisting.
+            # Recent history is a personal artifact but it should never carry
+            # short-lived credentials.
+            Url         = Get-RedactedUrl $job.Url
+            Dest        = $job.Dest
+            DoneAt      = $job.DoneAt
+            Status      = $job.Status
+            FilesAdded  = $job.FilesAdded
+            ToolUsed    = $job.ToolUsed
+            DurationMs  = $job.DurationMs
+            Error       = $job.Error
+        }
+        $recent = @($entry) + @($recent)
+        # Audit P2-37: `$recent[0..99]` throws on an empty array. Select-Object
+        # -First is safe for any Count including 0. Also handles the just-in-case
+        # case where a fresh recent.json somehow held zero entries but we tried
+        # to cap anyway.
+        if ($recent.Count -gt 100) { $recent = @($recent | Select-Object -First 100) }
+        # Atomic write (UTF-8 no BOM); a mid-write kill no longer leaves a truncated
+        # recent.json for the next Get-Recent to trip over.
+        Write-JsonAtomic -Path $path -Data $recent -Depth 4
     }
-    $recent = @($entry) + $recent
-    if ($recent.Count -gt 100) { $recent = $recent[0..99] }  # cap at 100
-    # Atomic write (UTF-8 no BOM); a mid-write kill no longer leaves a truncated
-    # recent.json for the next Get-Recent to trip over.
-    Write-JsonAtomic -Path $path -Data $recent -Depth 4
 }
 
 function Get-Recent {
@@ -310,8 +352,44 @@ function Clear-Recent {
     param(
         [datetime]$OlderThan
     )
-    $path = Get-RecentPath
+    # Audit P2-49: `Clear-Recent -OlderThan (Get-Date).AddDays(1)` used to
+    # drop EVERY entry (cutoff is in the future -> nothing qualifies as
+    # "recent enough to keep"). Refuse a future cutoff outright so a typo
+    # doesn't wipe a user's whole Recent list.
+    if ($PSBoundParameters.ContainsKey('OlderThan') -and $OlderThan -gt (Get-Date)) {
+        throw "Clear-Recent: -OlderThan must be in the past (got '$($OlderThan.ToString('o'))'); refusing to wipe Recent."
+    }
+    # Audit P2-36: share the recent mutex with Append-Recent so a completing
+    # job doesn't race a manual Clear. Marshal state via $script:* so the
+    # scriptblock scope doesn't need to close over local params (avoiding
+    # the "$OlderThan is null default" trap when the caller didn't pass it).
+    $script:_ClearRecentHasOlderThan = $PSBoundParameters.ContainsKey('OlderThan')
+    $script:_ClearRecentOlderThan    = if ($script:_ClearRecentHasOlderThan) { $OlderThan } else { [datetime]::MinValue }
+    $script:_ClearRecentPath         = Get-RecentPath
+    $script:_ClearRecentResult       = 0
+    _WithRecentMutex -Name 'Clear-Recent' -Action {
+        $psb = @{}
+        if ($script:_ClearRecentHasOlderThan) { $psb['OlderThan'] = $true }
+        $script:_ClearRecentResult = _Clear-RecentBody `
+            -Path $script:_ClearRecentPath `
+            -PSB $psb `
+            -OlderThan $script:_ClearRecentOlderThan
+    }
+    $result = [int]$script:_ClearRecentResult
+    Remove-Variable -Name _ClearRecentResult      -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable -Name _ClearRecentHasOlderThan -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable -Name _ClearRecentOlderThan   -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable -Name _ClearRecentPath        -Scope Script -ErrorAction SilentlyContinue
+    return $result
+}
+function _Clear-RecentBody {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$PSB,
+        [datetime]$OlderThan
+    )
     Ensure-AppData
+    $path = $Path
     if (-not (Test-Path $path)) { return 0 }
     $raw = Get-Content $path -Raw -Encoding UTF8
     if (-not $raw) { return 0 }
@@ -330,7 +408,7 @@ function Clear-Recent {
         $existing = @()
     }
     $before = @($existing).Count
-    if ($PSBoundParameters.ContainsKey('OlderThan')) {
+    if ($PSB.ContainsKey('OlderThan')) {
         $kept = @($existing | Where-Object {
             $ok = $false
             if ($_.DoneAt) {
@@ -379,7 +457,7 @@ function Clear-Recent {
     } else {
         Write-JsonAtomic -Path $path -Data $kept -Depth 4
     }
-    Log-Info ("recent cleared: removed=$removed" + $(if ($PSBoundParameters.ContainsKey('OlderThan')) { " (older than $($OlderThan.ToString('o')))" } else { ' (all)' }))
+    Log-Info ("recent cleared: removed=$removed" + $(if ($PSB.ContainsKey('OlderThan')) { " (older than $($OlderThan.ToString('o')))" } else { ' (all)' }))
     return $removed
 }
 

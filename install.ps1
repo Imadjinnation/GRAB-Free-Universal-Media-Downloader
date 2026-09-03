@@ -54,10 +54,18 @@ if (-not $pyExe) {
 }
 
 # Resolve the scripts folder for THIS Python. This is where pip puts the .exe wrappers.
-$scriptsDir = & $pyExe -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>&1
-if (-not (Test-Path $scriptsDir)) {
+# Audit P2-35: `python -c ... 2>&1` coerces stderr into the string result, and
+# a garbled result silently trips Test-Path into $false (or worse, into a
+# path with embedded stderr characters). Capture stderr separately with
+# `2>$null` and null-check explicitly.
+$scriptsDir = & $pyExe -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>$null
+if (-not $scriptsDir -or -not (Test-Path -LiteralPath $scriptsDir)) {
     # Fall back to user scripts dir (pip --user)
-    $scriptsDir = & $pyExe -c "import site,os,sys; print(os.path.join(site.USER_BASE, 'Scripts'))" 2>&1
+    $scriptsDir = & $pyExe -c "import site,os,sys; print(os.path.join(site.USER_BASE, 'Scripts'))" 2>$null
+}
+if (-not $scriptsDir -or -not (Test-Path -LiteralPath $scriptsDir)) {
+    Fail "Could not resolve Python scripts dir for $pyExe"
+    exit 1
 }
 Ok "Scripts dir: $scriptsDir"
 
@@ -98,7 +106,10 @@ if (-not $btInstalled) {
     try {
         # Ensure NuGet provider + trusted PSGallery so it installs quietly
         $null = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-        if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -eq 'Trusted') {
+        # Audit P2-34: parser precedence bug. `-not X.Y -eq 'Trusted'` parses
+        # as `((-not X.Y) -eq 'Trusted')` which is always $false (a bool is
+        # never the string 'Trusted'). Right shape is an explicit `-ne`.
+        if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -ne 'Trusted') {
             Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
         }
         Install-Module -Name BurntToast -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
@@ -174,7 +185,9 @@ $WshShell = New-Object -ComObject WScript.Shell
 $Desktop = Get-LocalDesktopPath
 $appEntry = Join-Path $script:Root 'grab-app.ps1'
 $vbsEntry = Join-Path $script:Root 'grab-app.vbs'
-$dropBat  = Join-Path $script:Root 'src\drop.bat'
+# Audit P2-33: the drag-drop launcher (src\_drop_.bat) shipped with v0.1
+# and was removed in v0.2 when the tray took over the paste flow -- the
+# variable that referenced it was dead code and has been removed.
 
 # Migration cleanup: if the user had prior installs, they may have grab.lnk /
 # grab Downloads.lnk on the OneDrive Desktop. Remove them so we don't end up

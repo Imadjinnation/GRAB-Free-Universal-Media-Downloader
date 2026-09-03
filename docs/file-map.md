@@ -15,6 +15,7 @@ Legend: **✓** built · **·** planned · **★** entry point
 | `install.ps1` | ✓ | Portable one-command installer (Python check, pip installs, BurntToast, shortcuts, autostart) |
 | `uninstall.ps1` | ✓ | Removes tray + shortcuts + autostart, asks before removing app-data + pip packages, leaves downloads untouched. Supports `-Yes` (silent full removal) and `-KeepState` (only touch shortcuts). |
 | `grab-app.ps1` | ✓ **★** | Main entry point — loads config, starts tray, wires callbacks |
+| `CHANGELOG.md` | ✓ | Version-by-version release notes (Keep-a-Changelog format) |
 
 ## `tests/` — smoke tests
 
@@ -33,7 +34,6 @@ Legend: **✓** built · **·** planned · **★** entry point
 | `src/tray.ps1` | ✓ | System tray NotifyIcon: custom icon (falls back to shell32), right-click menu, left-click summons popup, timers for queue tick + clipboard watch |
 | `src/popup.ps1` | ✓ | Loads `ui/popup.xaml`, wires Paste / Queue / Recent tabs, custom titlebar (drag/min/close), remembers window position |
 | `src/settings.ps1` | ✓ | Loads `ui/settings.xaml`, drives config edits, toggles autostart shortcut, hosts first-run onboarding |
-| `src/drop.bat` | · | Drag-drop launcher wrapper (drops resolve to grab-app.ps1 via this) |
 
 ## `ui/` — WPF XAML markup
 
@@ -61,6 +61,8 @@ Legend: **✓** built · **·** planned · **★** entry point
 | `docs/architecture.md` | ✓ | Component map + data flow diagrams |
 | `docs/site-coverage.md` | ✓ | Which engine handles which sites |
 | `docs/file-map.md` | ✓ | This file — canonical index |
+| `docs/config-reference.md` | ✓ | Every config.json key + default + effect (audit P2-61) |
+| `docs/audit-v0.2.2.md` | ✓ | Full audit findings tracking + progress log |
 | `docs/troubleshooting.md` | · | Common errors + fixes (cookies, ffmpeg missing, etc.) |
 | `docs/screenshots.md` | · | Visual walkthrough (added in CP5 after UI is stable) |
 

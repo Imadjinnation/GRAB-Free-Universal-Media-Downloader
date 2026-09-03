@@ -159,10 +159,18 @@ function Build-QueueRow([object]$job) {
     $row = [Windows.Markup.XamlReader]::Parse($xaml)
     $btn = $row.FindName('ActionBtn')
     if ($btn) {
+        # Audit P2-44: capture only the id; re-read the job's current status
+        # inside the click handler. Previously the closure captured `$status`
+        # at row-build time, so a row that was 'pending' when built but had
+        # transitioned to 'running' by click time still hit the Cancel branch
+        # (fine) -- and, worse, a 'failed' row that had auto-retried before
+        # the click hit Retry when it should have Cancelled. Reading fresh
+        # closes the stale-status window.
         $jobId  = $job.Id
-        $status = $job.Status
         $btn.Add_Click({
-            if ($status -in @('pending','running')) { Cancel-QueueJob $jobId }
+            $current = @(Read-Queue | Where-Object { $_.Id -eq $jobId } | Select-Object -First 1)
+            $status = if ($current.Count -gt 0) { $current[0].Status } else { 'pending' }
+            if ($status -in @('pending','running')) { Cancel-QueueJob $jobId | Out-Null }
             else { Retry-QueueJob $jobId }
         }.GetNewClosure())
     }
@@ -241,7 +249,13 @@ function Build-RecentRow([object]$entry) {
     if ($openBtn) {
         $dest = $entry.Dest
         $openBtn.Add_Click({
-            if ($dest -and (Test-Path -LiteralPath $dest)) { Start-Process explorer.exe $dest }
+            # Audit P2-45: Start-Process explorer.exe $dest tokenises on space,
+            # so a folder like "C:\My Downloads\Videos" opens as two separate
+            # explorer instances. Wrap in double quotes via -ArgumentList so
+            # explorer sees one intact path.
+            if ($dest -and (Test-Path -LiteralPath $dest)) {
+                Start-Process explorer.exe -ArgumentList ('"' + $dest + '"')
+            }
         }.GetNewClosure())
     }
     if ($retryBtn) {
@@ -420,7 +434,41 @@ function Load-PopupWindow {
                 return
             }
             $isSensitive = [bool]$CtlLocal.SensitiveToggle.IsChecked
-            $added = if ($isSensitive) { Add-QueueJob -Urls $urls -Sensitive } else { Add-QueueJob -Urls $urls }
+            # Audit P2-40: askBeforeEach implementation. When on, pop the
+            # Confirm-DownloadDialog for EACH url and honor its verdict
+            # (Cancel skips the url; CHOOSE FOLDER supplies a one-time Dest
+            # override without touching config). Off (default) keeps the
+            # zero-friction paste-and-go flow.
+            $cfg = try { Get-Config } catch { $null }
+            $askBeforeEach = $false
+            try { $askBeforeEach = [bool]$cfg.askBeforeEach } catch {}
+            $added = 0
+            if ($askBeforeEach -and (Get-Command Confirm-DownloadDialog -ErrorAction SilentlyContinue)) {
+                foreach ($u in $urls) {
+                    $defaultCat = try { Get-CategoryForUrl $u } catch { 'Misc' }
+                    $defaultDom = try { Get-FullDomain     $u } catch { 'misc' }
+                    $defaultDest = try {
+                        if ($isSensitive) {
+                            $priv = if ($cfg.sensitiveFolderName) { [string]$cfg.sensitiveFolderName } else { '.private' }
+                            Join-Path $cfg.downloadFolder (Join-Path $defaultCat (Join-Path $priv $defaultDom))
+                        } else {
+                            Join-Path $cfg.downloadFolder (Join-Path $defaultCat $defaultDom)
+                        }
+                    } catch { '' }
+                    $verdict = Confirm-DownloadDialog -Url $u -Dest $defaultDest -Sensitive:$isSensitive -Owner $WinLocal
+                    if ($verdict.Cancelled) {
+                        Log-Info "askBeforeEach: user cancelled $u"
+                        continue
+                    }
+                    $addArgs = @{ Urls = @($u) }
+                    if ($isSensitive) { $addArgs['Sensitive'] = $true }
+                    if ($verdict.Override) { $addArgs['Dest'] = $verdict.Override }
+                    $n = Add-QueueJob @addArgs
+                    $added = $added + [int]$n
+                }
+            } else {
+                $added = if ($isSensitive) { Add-QueueJob -Urls $urls -Sensitive } else { Add-QueueJob -Urls $urls }
+            }
             Log-Info ("submit: Add-QueueJob returned added=$added" + $(if ($isSensitive) { ' [SENSITIVE]' } else { '' }))
             $suffix = if ($isSensitive) { ' [sensitive -> .private]' } else { '' }
             $CtlLocal.StatusLine.Text = if ($added -eq 0) { "Already in the queue." }
@@ -712,7 +760,16 @@ function Show-Popup {
             } else {
                 $ctl.Hint.Text = 'Tip: copy a link first and it will auto-fill here.'
             }
-        } catch {}
+        } catch {
+            # Audit P2-46: don't just swallow. Clipboard.GetText can fail if
+            # another process is holding the clipboard open (browser extensions
+            # are notorious). Log once per session so repeated open+focus
+            # cycles don't spam the log if the culprit is persistent.
+            if (-not $script:ClipReadWarnedThisSession) {
+                Log-Warn "Clipboard.GetText failed on popup open: $($_.Exception.Message)"
+                $script:ClipReadWarnedThisSession = $true
+            }
+        }
 
         # Switch to requested tab
         $tabMap = @{ paste='TabPaste'; queue='TabQueue'; recent='TabRecent' }

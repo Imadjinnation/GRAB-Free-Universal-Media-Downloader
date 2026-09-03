@@ -123,6 +123,7 @@ function Load-SettingsWindow {
                      'ConcurrencySlider','ConcurrencyLabel',
                      'CookieBrowser','VideoQuality','ToastsEnabled','ClipboardWatch','Autostart',
                      'SensitiveByDefault','SensitiveSites',
+                     'SensitiveTestUrl','SensitiveTestBtn','SensitiveTestResult',
                      'CrtScanlines','ScanlinesOverlay',
                      'VersionLabel','OpenStateBtn','OpenLogsBtn',
                      'ResetBtn','SaveBtn','CancelBtn','StatusLine')) {
@@ -153,6 +154,37 @@ function Load-SettingsWindow {
     $ctl.CrtScanlines.Add_Unchecked({
         if ($CtlLocal.ScanlinesOverlay) { $CtlLocal.ScanlinesOverlay.Visibility = 'Collapsed' }
     }.GetNewClosure())
+
+    # ---------- Sensitive test-URL button (audit P2-53) -------------------
+    if ($ctl.SensitiveTestBtn) {
+        $ctl.SensitiveTestBtn.Add_Click({
+            try {
+                $u = ($CtlLocal.SensitiveTestUrl.Text).Trim()
+                if (-not $u) {
+                    $CtlLocal.SensitiveTestResult.Text = 'Paste a URL first.'
+                    return
+                }
+                # Evaluate against the UNSAVED textarea state so users can
+                # try a pattern before hitting Save. Mirrors the parsing
+                # rules in Save (trim, drop blanks, drop # comments).
+                $rawLines = $CtlLocal.SensitiveSites.Text -split "`r?`n"
+                $patterns = @($rawLines | ForEach-Object { $_.Trim() } |
+                              Where-Object { $_ -and -not $_.StartsWith('#') })
+                $matchedPattern = $null
+                $lower = $u.ToLower()
+                foreach ($p in $patterns) {
+                    if ($lower -like ("*" + $p.ToLower() + "*")) { $matchedPattern = $p; break }
+                }
+                if ($matchedPattern) {
+                    $CtlLocal.SensitiveTestResult.Text = "MATCH: pattern '$matchedPattern' -> would route to .private"
+                } else {
+                    $CtlLocal.SensitiveTestResult.Text = 'No match -- would download normally.'
+                }
+            } catch {
+                $CtlLocal.SensitiveTestResult.Text = "Test failed: $($_.Exception.Message)"
+            }
+        }.GetNewClosure())
+    }
 
     # ---------- Browse folder ---------------------------------------------
     $ctl.BrowseBtn.Add_Click({
@@ -192,6 +224,18 @@ function Load-SettingsWindow {
                     return
                 }
             }
+            # Audit P2-52: validate that downloadFolder is actually writeable.
+            # Test-Path only proves existence; users have hit this with folders
+            # mounted read-only or on external drives that came back after a
+            # sleep with stale ACLs.
+            try {
+                $probe = Join-Path $folder ('.grab-writetest-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+                [System.IO.File]::WriteAllText($probe, 'x')
+                Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            } catch {
+                $CtlLocal.StatusLine.Text = "Folder is not writeable: $($_.Exception.Message)"
+                return
+            }
 
             # Parse sensitive-sites textarea: one pattern per line, trim, drop
             # blanks / comment-lines (starting with #), keep the rest.
@@ -229,10 +273,29 @@ function Load-SettingsWindow {
             try { Set-Autostart $updates.autostart } catch {
                 Log-Warn "autostart toggle failed: $($_.Exception.Message)"
             }
+            # Audit P2-50 / PERF-4: reflect the clipboardWatch toggle in the
+            # running ClipTimer immediately -- start it if the user just
+            # turned it on, stop it if just turned off. The Update-Config
+            # above already persisted the new value; Sync-ClipTimer inspects
+            # the fresh config to decide.
+            try {
+                if (Get-Command Sync-ClipTimer -ErrorAction SilentlyContinue) { Sync-ClipTimer }
+            } catch { Log-Warn "Sync-ClipTimer failed: $($_.Exception.Message)" }
 
             $CtlLocal.StatusLine.Text = 'Saved.'
             Log-Info "settings saved: folder=$folder, concurrency=$($updates.concurrency), clipboard=$($updates.clipboardWatch), autostart=$($updates.autostart)"
-            $WinLocal.Hide()
+            # Audit P2-47: give the "Saved." text a 400ms breather before
+            # hiding so the flash is actually visible. Pre-v0.3.0 Save
+            # triggered Hide synchronously; the label change never repainted.
+            $delayTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $delayTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+            $delayTimerLocal = $delayTimer
+            $winForHide = $WinLocal
+            $delayTimer.Add_Tick({
+                try { $delayTimerLocal.Stop() } catch {}
+                try { $winForHide.Hide() } catch {}
+            }.GetNewClosure())
+            $delayTimer.Start()
         } catch {
             $CtlLocal.StatusLine.Text = "Save failed: $($_.Exception.Message)"
             Log-Err "settings save exception: $($_.Exception.Message)"

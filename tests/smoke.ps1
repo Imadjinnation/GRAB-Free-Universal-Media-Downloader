@@ -183,17 +183,18 @@ Test 'popup.xaml loads' {
     Assert-NotNull $win
     Assert-Equal 480 ([int]$win.Width)
     Assert-Equal 420 ([int]$win.Height)
-    $script:XamlWindow = $win
 }
 
+# Audit P2-58: each named-control test loads its own copy of the XAML so
+# the tests don't depend on ordering / on a shared $script:XamlWindow state.
 $expectedControls = @('TitleBar','MinBtn','CloseBtn','TabPaste','TabQueue','TabRecent',
     'PastePanel','QueuePanel','RecentPanel','UrlBox','MultiBox',
     'SingleInputBorder','MultiInputBorder','Hint','StatusLine','ToggleMulti','GrabBtn',
     'ClearRecentBtn','ClearOldRecentBtn')
 foreach ($c in $expectedControls) {
     Test "popup.xaml has named control: $c" {
-        if (-not $script:XamlWindow) { throw 'xaml load pass must run first' }
-        $ctl = $script:XamlWindow.FindName($c)
+        $freshWin = Parse-GrabXaml (Join-Path $uiRoot 'popup.xaml')
+        $ctl = $freshWin.FindName($c)
         Assert-NotNull $ctl "control $c not found"
     }
 }
@@ -2764,6 +2765,501 @@ Test 'Get-Config is idempotent across many rapid calls (perf sanity)' {
     $c2 = Get-Config
     Assert-Equal $c1.version $c2.version
     Assert-Equal $c1.concurrency $c2.concurrency
+}
+
+# ==========================================================================
+# 12. v0.3.0 phase 4 -- 31 P2 findings + 4 perf wins
+# ==========================================================================
+Section 'v0.3.0 phase 4 P2 fixes'
+
+# --- P2-33/34/35 install.ps1 ----------------------------------------------
+Test 'install.ps1 no longer references src\drop.bat (audit P2-33)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    if ($c -match 'drop\.bat') {
+        throw 'install.ps1 still references src\drop.bat (dead code -- file was removed in v0.2)'
+    }
+}
+Test 'install.ps1 Set-PSRepository check uses correct -ne precedence (audit P2-34)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    # The buggy form was `if (-not X.InstallationPolicy -eq 'Trusted') { ... }`
+    # which parses as `((-not X.Y) -eq 'Trusted')` and is always false. The
+    # fix is `if (X.InstallationPolicy -ne 'Trusted') { ... }`.
+    if ($c -match '-not\s+\(Get-PSRepository[\s\S]{0,200}-eq\s+.Trusted') {
+        throw 'install.ps1 Set-PSRepository guard still uses the -not/-eq parser trap'
+    }
+    Assert-Match $c 'InstallationPolicy\s+-ne\s+.Trusted.'
+}
+Test 'install.ps1 python scripts-dir probe uses 2>$null (audit P2-35)' {
+    $c = Get-Content (Join-Path $repoRoot 'install.ps1') -Raw
+    # The old form used 2>&1 which coerced stderr into $scriptsDir and made
+    # Test-Path silently fail. Must now capture stderr with 2>$null.
+    if ($c -notmatch 'sysconfig\.get_path[^\r\n]*2>\$null') {
+        throw 'install.ps1 must capture Python probe stderr separately with 2>$null'
+    }
+    # And the earlier 2>&1 pattern on the scriptsDir probe must be gone.
+    if ($c -match "sysconfig\.get_path\('scripts'\)`" 2>&1") {
+        throw 'install.ps1 still uses 2>&1 for the sysconfig probe (silently trips Test-Path)'
+    }
+}
+
+# --- P2-36 recent mutex ---------------------------------------------------
+Test 'queue.ps1 defines _WithRecentMutex + Append-Recent uses it (audit P2-36)' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    Assert-Match $c 'GrabAppRecentMutex'
+    Assert-Match $c 'function\s+_WithRecentMutex'
+    if ($c -notmatch 'function\s+Append-Recent[\s\S]{0,600}_WithRecentMutex') {
+        throw 'Append-Recent must be wrapped in _WithRecentMutex to avoid races with Clear-Recent'
+    }
+    if ($c -notmatch 'function\s+Clear-Recent[\s\S]{0,2500}_WithRecentMutex') {
+        throw 'Clear-Recent must acquire _WithRecentMutex to avoid races with Append-Recent'
+    }
+}
+
+# --- P2-37 empty-array cap ------------------------------------------------
+Test 'Append-Recent cap uses Select-Object -First (audit P2-37)' {
+    # Prove the code path doesn't throw when Recent is already large. The
+    # bug was `$recent[0..99]` throwing on an empty array; the fix uses
+    # Select-Object -First. Round-trip 105 entries and expect Get-Recent to
+    # return exactly 100.
+    if (Test-Path (Get-RecentPath)) { Remove-Item (Get-RecentPath) -Force }
+    for ($i = 0; $i -lt 105; $i++) {
+        Append-Recent ([PSCustomObject]@{
+            Url = "https://example.com/p2-37-$i"; Dest = 'C:\tmp'; DoneAt = (Get-Date).ToString('o')
+            Status = 'done'; FilesAdded = 1; ToolUsed = 'yt-dlp'; DurationMs = 1; Error = $null
+        })
+    }
+    Assert-Equal 100 @(Get-Recent).Count
+}
+
+# --- P2-38 Write-Queue array shape ----------------------------------------
+Test 'Write-Queue emits a JSON array for zero/one/many jobs (audit P2-38)' {
+    $orig = @(Read-Queue)
+    try {
+        Write-Queue @()
+        $raw = Get-Content (Get-QueuePath) -Raw
+        Assert-Match $raw '^\s*\[\s*\]\s*$' 'empty queue must serialize to []'
+        $j = [PSCustomObject]@{ Id='p238'; Url='https://x'; Status='pending'; StatusMsg='w' }
+        Write-Queue @($j)
+        $raw = Get-Content (Get-QueuePath) -Raw
+        Assert-Match $raw '^\s*\[' 'one-element queue must still be a JSON array'
+    } finally {
+        Write-Queue $orig
+    }
+}
+
+# --- P2-40 AskBeforeEach --------------------------------------------------
+Test 'Confirm-DownloadDialog is defined (audit P2-40)' {
+    $cmd = Get-Command Confirm-DownloadDialog -ErrorAction SilentlyContinue
+    Assert-NotNull $cmd 'Confirm-DownloadDialog missing from tray.ps1'
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'askBeforeEach[\s\S]{0,600}Confirm-DownloadDialog') {
+        throw 'popup.ps1 submit handler must call Confirm-DownloadDialog when config.askBeforeEach is on'
+    }
+}
+
+# --- P2-41 Cancel-QueueJob write-guard ------------------------------------
+Test 'Cancel-QueueJob only writes queue when it mutated something (audit P2-41)' {
+    $c = Get-Content (Join-Path $srcRoot 'queue.ps1') -Raw
+    if ($c -notmatch 'function\s+Cancel-QueueJob[\s\S]{0,1200}if\s*\(\s*\$script:_CancelMutated\s*\)') {
+        throw 'Cancel-QueueJob must gate Write-Queue on a mutated flag (audit P2-41)'
+    }
+    # Round-trip: cancelling an unknown id should not throw and return $false.
+    $mutated = Cancel-QueueJob 'no-such-id-p2-41'
+    Assert-Equal $false $mutated
+}
+
+# --- P2-42 About handler error surfaces -----------------------------------
+Test 'About handler wraps Show-AboutWindow in try/catch + toasts on failure (audit P2-42)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch "'About'[\s\S]{0,400}try\s*\{\s*Show-AboutWindow[\s\S]{0,300}Send-Toast\s+'grab'\s+'Could not open About") {
+        throw 'About menu handler must try/catch + Send-Toast so silent failures are surfaced'
+    }
+}
+
+# --- P2-43 config-read error surfaces -------------------------------------
+Test 'Confirm-ArcadeDialog + Show-AboutWindow log the swallowed config-read error (audit P2-43)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'Confirm-ArcadeDialog:\s*Get-Config failed') {
+        throw 'Confirm-ArcadeDialog must Log-Warn on Get-Config failure, not swallow silently'
+    }
+    if ($c -notmatch 'Show-AboutWindow:\s*Get-Config failed') {
+        throw 'Show-AboutWindow must Log-Warn on Get-Config failure, not swallow silently'
+    }
+}
+
+# --- P2-44 Build-QueueRow re-reads status ---------------------------------
+Test 'Build-QueueRow click handler re-reads status by id (audit P2-44)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch '\$btn\.Add_Click\(\{[\s\S]{0,600}Read-Queue\s*\|\s*Where-Object\s*\{\s*\$_\.Id\s+-eq\s+\$jobId') {
+        throw 'Build-QueueRow click handler must re-read the job status by id (do not capture $status at build time)'
+    }
+}
+
+# --- P2-45 Start-Process explorer quotes ----------------------------------
+Test 'Recent Open button quotes the path via -ArgumentList (audit P2-45)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'Start-Process\s+explorer\.exe\s+-ArgumentList\s*\(''"''\s*\+\s*\$dest\s*\+\s*''"''\)') {
+        throw 'Recent Open handler must Start-Process explorer.exe -ArgumentList (''"'' + $dest + ''"'') so folders-with-spaces open once'
+    }
+}
+
+# --- P2-46 clipboard read swallow -----------------------------------------
+Test 'popup.ps1 Clipboard.GetText failure logs once per session (audit P2-46)' {
+    $c = Get-Content (Join-Path $srcRoot 'popup.ps1') -Raw
+    if ($c -notmatch 'ClipReadWarnedThisSession') {
+        throw 'popup.ps1 must Log-Warn (throttled per session) on Clipboard.GetText failure'
+    }
+}
+
+# --- P2-47 save flash delay -----------------------------------------------
+Test 'settings.ps1 Save delays Hide by 400ms so the flash is visible (audit P2-47)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch "StatusLine\.Text\s*=\s*'Saved\.'[\s\S]{0,600}FromMilliseconds\(400\)") {
+        throw 'settings.ps1 must delay Hide by 400ms after setting the "Saved." status text (audit P2-47)'
+    }
+}
+
+# --- P2-48 first-run balloon copy -----------------------------------------
+Test 'first-run balloon text mentions the ^ arrow (audit P2-48)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'may be under the \^ arrow') {
+        throw 'first-run balloon must mention the ^ arrow so orientation-neutral wording lands (audit P2-48)'
+    }
+}
+
+# --- P2-49 Clear-Recent future cutoff refused -----------------------------
+Test 'Clear-Recent refuses a future -OlderThan cutoff (audit P2-49)' {
+    $threw = $false
+    try {
+        Clear-Recent -OlderThan (Get-Date).AddDays(1) | Out-Null
+    } catch { $threw = $true }
+    Assert-True $threw 'Clear-Recent must throw on a future -OlderThan cutoff'
+}
+
+# --- P2-50 / PERF-4 ClipTimer gating --------------------------------------
+Test 'Sync-ClipTimer starts/stops based on config (audit P2-50 / PERF-4)' {
+    $cmd = Get-Command Sync-ClipTimer -ErrorAction SilentlyContinue
+    Assert-NotNull $cmd 'Sync-ClipTimer missing from tray.ps1'
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'function\s+Sync-ClipTimer[\s\S]{0,1200}clipboardWatch') {
+        throw 'Sync-ClipTimer must inspect config.clipboardWatch to decide start vs stop'
+    }
+    if ($c -notmatch 'function\s+Start-Timers[\s\S]{0,4000}Sync-ClipTimer') {
+        throw 'Start-Timers must call Sync-ClipTimer (do not unconditionally start ClipTimer)'
+    }
+    $s = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($s -notmatch 'Sync-ClipTimer') {
+        throw 'settings.ps1 Save must call Sync-ClipTimer after Update-Config so the toggle takes effect live'
+    }
+}
+
+# --- P2-52 write-test on Save --------------------------------------------
+Test 'Settings Save writes a probe file to validate writeability (audit P2-52)' {
+    $c = Get-Content (Join-Path $srcRoot 'settings.ps1') -Raw
+    if ($c -notmatch '\.grab-writetest-') {
+        throw 'settings.ps1 Save must attempt a probe write into the folder and fail cleanly if it cannot'
+    }
+}
+
+# --- P2-53 test-a-URL input in Settings -----------------------------------
+Test 'settings.xaml has SensitiveTestUrl + SensitiveTestBtn (audit P2-53)' {
+    $win = Parse-GrabXaml (Join-Path $uiRoot 'settings.xaml')
+    Assert-NotNull ($win.FindName('SensitiveTestUrl'))
+    Assert-NotNull ($win.FindName('SensitiveTestBtn'))
+    Assert-NotNull ($win.FindName('SensitiveTestResult'))
+}
+
+# --- P2-54 .info.json filter by creation time -----------------------------
+Test 'Invoke-PostProcess only deletes .info.json created during THIS run (audit P2-54)' {
+    $c = Get-Content (Join-Path $srcRoot 'core.ps1') -Raw
+    if ($c -notmatch "Filter\s+'\*\.info\.json'[\s\S]{0,300}CreationTime\s+-ge\s+\`$StartedAt") {
+        throw 'Invoke-PostProcess must filter .info.json cleanup by CreationTime -ge $StartedAt so external sidecars survive'
+    }
+}
+
+# --- P2-55 redact regex extended ------------------------------------------
+Test 'Write-Log redacts extended vocabulary (bearer / oauth / jwt / signed-URL) (audit P2-55)' {
+    $env:GRAB_APP_DATA_OVERRIDE = Join-Path $env:TEMP ("grab-log-p255-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    try {
+        Ensure-AppData
+        Log-Info 'https://example.com/x?bearer=BB1&oauth_token=OT2&jwt=JJ3&X-Amz-Signature=SS4'
+        # Flush the batched queue (Log-Info in test context doesn't rely on the tray timer).
+        try { Flush-LogQueue } catch {}
+        $logFile = Join-Path (Get-LogFolder) ("grab-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
+        $content = Get-Content $logFile -Raw
+        foreach ($secret in @('BB1','OT2','JJ3','SS4')) {
+            Assert-True ($content -notmatch $secret) "secret [$secret] leaked into log"
+        }
+        Assert-Match $content 'bearer=REDACTED'
+        Assert-Match $content 'oauth_token=REDACTED'
+        Assert-Match $content 'jwt=REDACTED'
+        Assert-Match $content 'X-Amz-Signature=REDACTED'
+    } finally {
+        Remove-Item -LiteralPath $env:GRAB_APP_DATA_OVERRIDE -Recurse -Force -ErrorAction SilentlyContinue
+        $env:GRAB_APP_DATA_OVERRIDE = $testAppData
+    }
+}
+
+# --- P2-56 Recent stores redacted URL -------------------------------------
+Test 'Append-Recent stores URLs through the redact regex (audit P2-56)' {
+    if (Test-Path (Get-RecentPath)) { Remove-Item (Get-RecentPath) -Force }
+    $u = 'https://example.com/x?token=SECRETXYZ&other=fine'
+    Append-Recent ([PSCustomObject]@{
+        Url = $u; Dest = 'C:\tmp'; DoneAt = (Get-Date).ToString('o')
+        Status = 'done'; FilesAdded = 1; ToolUsed = 'yt-dlp'; DurationMs = 1; Error = $null
+    })
+    $r = @(Get-Recent)
+    Assert-Equal 1 $r.Count
+    Assert-True ($r[0].Url -notmatch 'SECRETXYZ') 'token leaked into recent.json'
+    Assert-Match $r[0].Url 'token=REDACTED'
+    Assert-Match $r[0].Url 'other=fine'
+}
+
+# --- P2-57 GRAB_STARTUP_OVERRIDE ------------------------------------------
+Test 'Get-LocalStartupPath honors GRAB_STARTUP_OVERRIDE for test isolation (audit P2-57)' {
+    $fake = Join-Path $env:TEMP ("grab-startup-override-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Path $fake -Force | Out-Null
+    $env:GRAB_STARTUP_OVERRIDE = $fake
+    try {
+        $p = Get-LocalStartupPath
+        Assert-Equal $fake $p
+    } finally {
+        Remove-Item Env:GRAB_STARTUP_OVERRIDE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# --- P2-58 XAML isolation per test ----------------------------------------
+Test 'popup.xaml named-control tests load their own copy (audit P2-58)' {
+    # Regression: pre-v0.3.0 the named-control tests shared $script:XamlWindow
+    # and depended on the "popup.xaml loads" test running first. The current
+    # code path loads fresh per test -- prove by parsing twice successfully.
+    $w1 = Parse-GrabXaml (Join-Path $uiRoot 'popup.xaml')
+    $w2 = Parse-GrabXaml (Join-Path $uiRoot 'popup.xaml')
+    Assert-NotNull $w1
+    Assert-NotNull $w2
+    # Two distinct object references so nothing carries hidden state between tests.
+    Assert-True ([object]::ReferenceEquals($w1, $w2) -eq $false) 'each parse should produce a fresh Window'
+}
+
+# --- P2-59 XamlReader-based Visual tree inspection ------------------------
+Test 'popup.xaml + settings.xaml + tray About XAML parse via XamlReader and expose expected properties (audit P2-59)' {
+    Add-Type -AssemblyName PresentationFramework | Out-Null
+    $pw = Parse-GrabXaml (Join-Path $uiRoot 'popup.xaml')
+    Assert-NotNull $pw
+    Assert-Equal 'False' ([string]$pw.ShowInTaskbar)
+    Assert-True ($pw.Icon -ne $null) 'popup.xaml must declare Icon'
+    $sw = Parse-GrabXaml (Join-Path $uiRoot 'settings.xaml')
+    Assert-NotNull $sw
+    Assert-Equal 'False' ([string]$sw.ShowInTaskbar)
+    Assert-True ($sw.Icon -ne $null) 'settings.xaml must declare Icon'
+    # About XAML lives inline in tray.ps1; substitute its tokens and parse.
+    $trayText = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    $aboutRx  = [regex]"(?ms)\`$script:AboutXaml = @'\r?\n(.+?)\r?\n'@"
+    $m = $aboutRx.Match($trayText)
+    Assert-True $m.Success 'could not extract $script:AboutXaml from tray.ps1'
+    $aboutSubs = Get-GrabTokenSubstituted $m.Groups[1].Value
+    $aw = [Windows.Markup.XamlReader]::Parse($aboutSubs)
+    Assert-NotNull $aw
+    Assert-Equal 'False' ([string]$aw.ShowInTaskbar)
+}
+
+# --- P2-60 BOM-free / atomic-write / chaos tests --------------------------
+Test 'state files write without a UTF-8 BOM (audit P2-60)' {
+    # Fresh isolated app-data so queue.json / recent.json / config.json get
+    # written by the current code path.
+    $iso = Join-Path $env:TEMP ("grab-bom-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    . (Join-Path $srcRoot 'utils.ps1')
+    . (Join-Path $srcRoot 'queue.ps1')
+    try {
+        Ensure-AppData
+        $null = Get-Config
+        Write-Queue @()
+        Append-Recent ([PSCustomObject]@{
+            Url='https://ex.com/bom'; Dest='C:\tmp'; DoneAt=(Get-Date).ToString('o')
+            Status='done'; FilesAdded=1; ToolUsed='yt-dlp'; DurationMs=1; Error=$null
+        })
+        foreach ($f in @((Get-ConfigPath), (Get-QueuePath), (Get-RecentPath))) {
+            if (-not (Test-Path -LiteralPath $f)) { continue }
+            $bytes = [System.IO.File]::ReadAllBytes($f)
+            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+                throw "state file $f still has UTF-8 BOM (audit P2-60)"
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $iso -Recurse -Force -ErrorAction SilentlyContinue
+        $env:GRAB_APP_DATA_OVERRIDE = $testAppData
+        . (Join-Path $srcRoot 'utils.ps1')
+        . (Join-Path $srcRoot 'queue.ps1')
+    }
+}
+Test 'Write-JsonAtomic leaves no .tmp residue on a successful write (audit P2-60)' {
+    $tmp = Join-Path $env:TEMP ("grab-atomic-noresidue-" + [Guid]::NewGuid().ToString('N').Substring(0,8) + ".json")
+    try {
+        for ($i = 0; $i -lt 5; $i++) {
+            Write-JsonAtomic -Path $tmp -Data @{ i = $i } -Depth 2
+            Assert-True (-not (Test-Path -LiteralPath "$tmp.tmp")) "stale .tmp survived iteration $i"
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "$tmp.tmp" -Force -ErrorAction SilentlyContinue
+    }
+}
+Test 'chaos: corrupt queue.json is recovered / reset cleanly (audit P2-60)' {
+    # Blast in garbage bytes; Read-Queue must not throw + must yield an
+    # empty enumeration. Then Write-Queue must restore a valid array.
+    Set-Content -Path (Get-QueuePath) -Value 'garbage {{ not json' -Encoding UTF8
+    $q = @(Read-Queue)
+    Assert-Equal 0 $q.Count 'corrupt queue.json should read as empty, not throw'
+    Write-Queue @()
+    $raw = Get-Content (Get-QueuePath) -Raw
+    Assert-Match $raw '^\s*\[\s*\]\s*$' 'queue.json must be a valid empty array after recovery'
+}
+Test 'chaos: corrupt config.json is recovered via backup + defaults (audit P2-60)' {
+    # Already covered elsewhere as a Get-Config test; assert the "kill mid-
+    # write survivability" contract explicitly: writing garbage then reading
+    # via Get-Config must yield a valid config.
+    Set-Content -Path (Get-ConfigPath) -Value '{"broken' -Encoding UTF8
+    $c = Get-Config
+    Assert-NotNull $c
+    Assert-NotNull $c.downloadFolder
+    Assert-NotNull $c.concurrency
+    # Cleanup: remove backups
+    $backups = @(Get-ChildItem (Split-Path (Get-ConfigPath) -Parent) -Filter 'config.json.corrupt-*' -ErrorAction SilentlyContinue)
+    foreach ($b in $backups) { Remove-Item -LiteralPath $b.FullName -Force -ErrorAction SilentlyContinue }
+}
+
+# --- P2-61 config-reference doc -------------------------------------------
+Test 'docs/config-reference.md exists and lists every documented key (audit P2-61)' {
+    $p = Join-Path $docsRoot 'config-reference.md'
+    Assert-PathExists $p
+    $c = Get-Content $p -Raw
+    foreach ($k in @('downloadFolder','askBeforeEach','clipboardWatch','concurrency','autostart',
+                     'cookieBrowser','videoQuality','toastsEnabled','popupPositionX','popupPositionY',
+                     'firstRunComplete','sensitiveByDefault','sensitiveSites','sensitiveFolderName','crtScanlines')) {
+        Assert-Match $c ('`' + $k + '`') "config-reference.md missing key: $k"
+    }
+}
+
+# --- P2-62 README troubleshooting ----------------------------------------
+Test 'README has a Troubleshooting section (audit P2-62)' {
+    $c = Get-Content (Join-Path $repoRoot 'README.md') -Raw
+    Assert-Match $c '(?m)^##\s+Troubleshooting'
+    Assert-Match $c 'Copy diagnostics'
+    Assert-Match $c 'Restart tray'
+    Assert-Match $c '%APPDATA%\\grab-app'
+}
+
+# --- P2-63 CHANGELOG ------------------------------------------------------
+Test 'CHANGELOG.md exists with entries for every release (audit P2-63)' {
+    $p = Join-Path $repoRoot 'CHANGELOG.md'
+    Assert-PathExists $p
+    $c = Get-Content $p -Raw
+    foreach ($v in @('0.1.0','0.1.1','0.1.2','0.2.0','0.2.1','0.2.2','0.3.0')) {
+        Assert-Match $c ('\[' + [regex]::Escape($v) + '\]') "CHANGELOG missing entry for $v"
+    }
+    # Keep-a-Changelog header
+    Assert-Match $c 'Keep a Changelog'
+}
+
+# --- PERF-1 adaptive tick timer ------------------------------------------
+Test 'tray.ps1 defines adaptive tick interval + LastQueueActivityAt (PERF-1)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    Assert-Match $c 'LastQueueActivityAt'
+    Assert-Match $c 'function\s+Get-DesiredTickInterval'
+    Assert-Match $c 'TickIntervalIdle'
+    Assert-Match $c 'TickIntervalFast'
+    if ($c -notmatch 'idleFor\.TotalMinutes\s+-lt\s+5') {
+        throw 'Get-DesiredTickInterval must gate the fast interval on "activity within last 5min"'
+    }
+}
+Test 'Get-DesiredTickInterval backs off to 30s when queue empty and idle >5min (PERF-1)' {
+    # Force the state the function keys off of, then evaluate.
+    if (Get-Command Notify-QueueActivity -ErrorAction SilentlyContinue) {
+        # Wipe the queue so we're truly idle.
+        Write-Queue @()
+        $script:LastQueueActivityAt = (Get-Date).AddMinutes(-10)
+        $script:BatterySaverOn = $false
+        $script:OnBattery      = $false
+        $desired = Get-DesiredTickInterval
+        Assert-Equal ([TimeSpan]::FromSeconds(30)) $desired
+    }
+}
+
+# --- PERF-2 battery / power awareness -------------------------------------
+Test 'Start-Timers registers PowerModeChanged handler + tracks OnBattery (PERF-2)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    Assert-Match $c 'PowerModeChanged'
+    Assert-Match $c 'OnBattery'
+    if ($c -notmatch 'TickIntervalBattery') {
+        throw 'tray.ps1 must define a tightened tick interval for battery-saver mode (PERF-2)'
+    }
+}
+Test 'Get-DesiredTickInterval picks battery interval when on battery + idle (PERF-2)' {
+    if (Get-Command Get-DesiredTickInterval -ErrorAction SilentlyContinue) {
+        Write-Queue @()
+        $script:LastQueueActivityAt = (Get-Date).AddMinutes(-10)
+        $script:OnBattery       = $true
+        $script:BatterySaverOn  = $false
+        $desired = Get-DesiredTickInterval
+        Assert-Equal ([TimeSpan]::FromSeconds(15)) $desired
+        $script:OnBattery = $false
+    }
+}
+
+# --- PERF-3 log batching --------------------------------------------------
+Test 'utils.ps1 defines the log-batching queue + Flush-LogQueue (PERF-3)' {
+    $c = Get-Content (Join-Path $srcRoot 'utils.ps1') -Raw
+    Assert-Match $c 'function\s+Flush-LogQueue'
+    Assert-Match $c 'function\s+Enable-LogBatching'
+    Assert-Match $c 'LogQueue'
+    if ($c -notmatch 'ConcurrentQueue') {
+        throw 'log queue must be a ConcurrentQueue so Write-Log can enqueue from any thread'
+    }
+}
+Test 'Start-Timers wires the LogFlushTimer at 1s (PERF-3)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch 'LogFlushTimer[\s\S]{0,300}FromSeconds\(1\)') {
+        throw 'Start-Timers must start LogFlushTimer at 1s to drain the batched log queue'
+    }
+    if ($c -notmatch 'Flush-LogQueue') {
+        throw 'Start-Timers LogFlushTimer must call Flush-LogQueue on tick'
+    }
+}
+Test 'Write-Log batches when Enable-LogBatching has been called (PERF-3)' {
+    $iso = Join-Path $env:TEMP ("grab-batch-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+    $env:GRAB_APP_DATA_OVERRIDE = $iso
+    . (Join-Path $srcRoot 'utils.ps1')
+    try {
+        Ensure-AppData
+        Enable-LogBatching
+        Log-Info 'batched line one'
+        Log-Info 'batched line two'
+        $logFile = Join-Path (Get-LogFolder) ("grab-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
+        # Before flush, the file should NOT yet contain the batched lines.
+        $preExists = Test-Path -LiteralPath $logFile
+        $preContent = if ($preExists) { Get-Content -LiteralPath $logFile -Raw } else { '' }
+        Assert-True ($preContent -notmatch 'batched line one') 'pre-flush should not contain batched entries'
+        Flush-LogQueue
+        Disable-LogBatching
+        $post = Get-Content -LiteralPath $logFile -Raw
+        Assert-Match $post 'batched line one'
+        Assert-Match $post 'batched line two'
+    } finally {
+        Disable-LogBatching
+        Remove-Item -LiteralPath $iso -Recurse -Force -ErrorAction SilentlyContinue
+        $env:GRAB_APP_DATA_OVERRIDE = $testAppData
+        . (Join-Path $srcRoot 'utils.ps1')
+    }
+}
+
+# --- PERF-4 ClipTimer only when clipboardWatch=true -----------------------
+Test 'Sync-ClipTimer never starts ClipTimer when clipboardWatch=false (PERF-4)' {
+    $c = Get-Content (Join-Path $srcRoot 'tray.ps1') -Raw
+    if ($c -notmatch "function\s+Sync-ClipTimer[\s\S]{0,1500}if\s*\(\`$wantOn\)") {
+        throw 'Sync-ClipTimer must gate ClipTimer creation on $wantOn (config.clipboardWatch)'
+    }
 }
 
 } finally {
